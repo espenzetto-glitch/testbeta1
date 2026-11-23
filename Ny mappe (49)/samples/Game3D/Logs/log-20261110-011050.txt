@@ -1,0 +1,39 @@
+﻿SharpEngine log report
+======================
+Created : 2026-11-10 01:10:50
+Scene   : NewScene
+Project : C:\Games\SharpEngine\samples\Game3D
+System  : .NET 11.0.0-rc.3.26522.148, Microsoft Windows 10.0.26200
+Summary : 0 error(s), 0 warning(s), 0 message(s)
+
+COMPILE PROBLEMS (latest build)
+-------------------------------
+1. ERROR   CS0101   _1.cs  line 3, column 14
+   The namespace '<global namespace>' already contains a definition for '_1'
+       3 | public class _1 : Component
+                        ^
+
+2. ERROR   CS0263   _1.cs  line 90, column 14
+   Partial declarations of '_1' must not specify different base classes
+
+3. ERROR   CS0111   _1.cs  line 7, column 26
+   Type '_1' already defines a member called 'Start' with the same parameter types
+       7 |     public override void Start()
+                                    ^
+
+4. ERROR   CS0111   _1.cs  line 11, column 26
+   Type '_1' already defines a member called 'Update' with the same parameter types
+      11 |     public override void Update(float dt)
+                                    ^
+
+5. ERROR   CS0120   _1.cs  line 158, column 20
+   An object reference is required for the non-static field, method, or property 'World.Objects'
+
+6. ERROR   CS0120   _1.cs  line 14, column 9
+   An object reference is required for the non-static field, method, or property 'Transform.Rotate(Vector3)'
+      14 |         Transform.Rotate(new Vector3(0f, 45f * Speed * dt, 0f));
+                   ^
+
+LOG (oldest first)
+------------------
+(empty)

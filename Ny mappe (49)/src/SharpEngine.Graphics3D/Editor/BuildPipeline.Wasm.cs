@@ -1,0 +1,250 @@
+﻿using System.Diagnostics;
+using System.IO.Compression;
+using System.Net;
+using System.Text;
+using System.Text.Json;
+
+namespace SharpEngine.Graphics3D.Editor;
+
+/// <summary>
+/// The WebAssembly build: publishes src/SharpEngine.Web (the real engine plus your game's C# code) and puts the scenes and assets
+/// next to it as plain files the page downloads at start. Output: a static site (host it anywhere, or press Run to try it locally).
+/// </summary>
+public static partial class BuildPipeline
+{
+    /// <summary>Runs "dotnet publish" for the web project. Returns the exit code. Tests replace it.</summary>
+    public static Func<string, string, string, Action<string>, int> WasmPublisher { get; set; } = DotnetPublishWasm;
+
+    /// <summary>Set to use a SharpEngine.Web.csproj from a different place (tests).</summary>
+    public static string? WebProjectOverride { get; set; }
+
+    /// <summary>Finds src/SharpEngine.Web/SharpEngine.Web.csproj next to the game (searching upward from the project and solution folders).</summary>
+    public static string? FindWebProject()
+    {
+        if (WebProjectOverride is { } given) return File.Exists(given) ? given : null;
+        foreach (var start in new[] { GameProject.ProjectDirectory, GameProject.SolutionDirectory, GameProject.Root }.Where(d => !string.IsNullOrEmpty(d)).Distinct())
+        {
+            var dir = new DirectoryInfo(start!);
+            for (int i = 0; i < 6 && dir is not null; i++, dir = dir.Parent)
+            {
+                string candidate = Path.Combine(dir.FullName, "src", "SharpEngine.Web", "SharpEngine.Web.csproj");
+                if (File.Exists(candidate)) return candidate;
+            }
+        }
+        return null;
+    }
+
+    private static void ExecuteWasm(string webProject, string outDir, BuildConfig cfg, List<string> scenes, bool runAfter)
+    {
+        var watch = Stopwatch.StartNew();
+        var req = new PublishRequest(webProject, "browser-wasm", "Release", outDir, false, false);
+        string work = Path.Combine(Path.GetDirectoryName(outDir.TrimEnd(Path.DirectorySeparatorChar))!, ".wasm-work");
+        try
+        {
+            if (Directory.Exists(outDir)) Directory.Delete(outDir, recursive: true);
+            if (Directory.Exists(work)) Directory.Delete(work, recursive: true);
+            Directory.CreateDirectory(work);
+
+            // 1. the game's own C# (components, scripts) is compiled into the web player
+            var code = CollectGameCode(work);
+            lock (Gate) Log.AppendLine($"game code: {code.Count} file(s)");
+            string publishDir = Path.Combine(work, "publish");
+            SetStatus("Compiling the engine and your game to WebAssembly (dotnet publish) ...", false);
+            int exit = WasmPublisher(webProject, publishDir, string.Join("%3B", code), line => { lock (Gate) Log.AppendLine(line); });
+            if (exit != 0)
+            {
+                WriteLog(req);
+                string firstError;
+                lock (Gate) firstError = Log.ToString().Split('\n').FirstOrDefault(l => l.Contains(": error ")) ?? "";
+                if (firstError.Length > 170) firstError = firstError.Substring(0, 170) + "...";
+                SetStatus($"WebAssembly build failed (exit code {exit}). {firstError.Trim()} See Builds/last-build.log. Tip: 'Lite (JavaScript)' needs no extra tools.", true);
+                return;
+            }
+            string site = Path.Combine(publishDir, "wwwroot");
+            if (!Directory.Exists(site)) site = publishDir;
+            CopyTree(site, outDir, work);
+
+            // 2. the game's files, downloaded by the page at start
+            SetStatus("Adding scenes and assets ...", false);
+            string gameDir = Path.Combine(outDir, "game");
+            var files = new List<string>();
+            void Add(string relative, string source) { Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(gameDir, relative))!); File.Copy(source, Path.Combine(gameDir, relative), true); files.Add(relative.Replace('\\', '/')); }
+            foreach (var name in scenes) Add("Scenes/" + name + ".json", SceneManager.FileFor(name));
+
+            string mapFile = Path.Combine(gameDir, WorldLayout.FileName);
+            WorldLayout.WriteSubset(mapFile, scenes);
+            files.Add(WorldLayout.FileName);
+
+            string assets = Path.Combine(GameProject.Root, "Assets");
+            if (Directory.Exists(assets))
+                foreach (var f in Directory.GetFiles(assets, "*", SearchOption.AllDirectories).Where(f => Assets.IsTexture(f) || Assets.IsModel(f)))
+                    Add(Path.GetRelativePath(GameProject.Root, f), f);
+
+            var playerCfg = cfg;
+            playerCfg.Scenes = scenes.Select(n => new BuildScene { Path = SceneManager.BuildPathFor(n), Enabled = true }).ToList();
+            File.WriteAllText(Path.Combine(gameDir, GameProject.ConfigFileName), playerCfg.ToJson());
+            files.Add(GameProject.ConfigFileName);
+
+            File.WriteAllText(Path.Combine(gameDir, "manifest.json"), JsonSerializer.Serialize(new { title = cfg.ProductName, files }));
+
+            string index = Path.Combine(outDir, "index.html");
+            File.WriteAllText(index, File.ReadAllText(index).Replace("{{TITLE}}", WebUtility.HtmlEncode(cfg.ProductName)));
+            File.WriteAllText(Path.Combine(outDir, ".nojekyll"), "");
+            File.WriteAllText(Path.Combine(outDir, "README.txt"),
+                $"{cfg.ProductName} - WebAssembly build of your SharpEngine game.\n\n" +
+                "This is a static website: upload the whole folder to any web host (itch.io HTML5, GitHub Pages, Netlify, your own server).\n" +
+                "It cannot be opened by double-clicking index.html, because browsers do not run WebAssembly from files.\n" +
+                "To try it on your computer: run Play.cmd (needs Python), or press Run in the editor's Build Settings.\n");
+            File.WriteAllText(Path.Combine(outDir, "Play.cmd"),
+                "@echo off\r\ncd /d \"%~dp0\"\r\necho Open http://localhost:8080 in your browser (Ctrl+C to stop)\r\nstart \"\" http://localhost:8080\r\n" +
+                "python -m http.server 8080 2>nul || py -m http.server 8080 2>nul || echo Python was not found. Install it from python.org, or press Run in the editor instead.\r\npause\r\n");
+
+            string result = outDir;
+            if (cfg.Compression == CompressionMethod.Zip)
+            {
+                SetStatus("Compressing ...", false);
+                result = outDir.TrimEnd(Path.DirectorySeparatorChar) + ".zip";
+                if (File.Exists(result)) File.Delete(result);
+                ZipFile.CreateFromDirectory(outDir, result);
+            }
+
+            WriteLog(req);
+            lock (Gate) _lastOutput = outDir;
+            string text = $"WebAssembly build succeeded in {watch.Elapsed.TotalSeconds:0.#}s ({FormatSize(DirectorySize(outDir))}): {result}";
+            if (runAfter) text += " " + OpenInBrowser(ServeLocally(outDir));
+            SetStatus(text, false);
+        }
+        catch (Exception ex)
+        {
+            lock (Gate) Log.AppendLine(ex.ToString());
+            try { WriteLog(req); } catch (Exception) { }
+            SetStatus($"WebAssembly build failed: {ex.Message}", true);
+        }
+        finally
+        {
+            try { if (Directory.Exists(work)) Directory.Delete(work, recursive: true); } catch (Exception) { }
+            _building = false;
+        }
+    }
+
+    /// <summary>
+    /// The game's C# files that go into the web player: everything in Scripts/ (given the same implicit usings the in-game editor gives them)
+    /// and the game project's own .cs files, except the one that starts the desktop window.
+    /// </summary>
+    internal static List<string> CollectGameCode(string work)
+    {
+        var result = new List<string>();
+        string staging = Path.Combine(work, "scripts");
+
+        string scripts = Path.Combine(GameProject.Root, "Scripts");
+        if (Directory.Exists(scripts))
+        {
+            Directory.CreateDirectory(staging);
+            foreach (var file in Directory.GetFiles(scripts, "*.cs", SearchOption.AllDirectories))
+            {
+                string text = File.ReadAllText(file);
+                string header = string.Concat(new[]
+                {
+                    "using System;", "using System.Collections.Generic;", "using System.Linq;", "using System.Numerics;", "using SharpEngine.Graphics3D;"
+                }.Select(u => u + " "));
+                foreach (var (alias, target) in new[] { ("Color", "Raylib_cs.Color"), ("KeyboardKey", "Raylib_cs.KeyboardKey"), ("MouseButton", "Raylib_cs.MouseButton"), ("Rl", "Raylib_cs.Raylib") })
+                    if (!System.Text.RegularExpressions.Regex.IsMatch(text, @"using\s+" + alias + @"\s*="))
+                        header += $"using {alias} = {target}; ";
+                string staged = Path.Combine(staging, Path.GetRelativePath(scripts, file).Replace(Path.DirectorySeparatorChar, '_'));
+                File.WriteAllText(staged, header + "\n#line 1 \"" + file.Replace("\\", "/") + "\"\n" + text);
+                result.Add(staged);
+            }
+        }
+
+        if (GameProject.ProjectDirectory is { } project)
+            foreach (var file in Directory.GetFiles(project, "*.cs", SearchOption.TopDirectoryOnly))
+            {
+                string text = File.ReadAllText(file);
+                if (text.Contains("App3D.Run") || text.Contains("static void Main") || text.Contains("static int Main")) continue;   // the desktop entry point
+                result.Add(file);
+            }
+        return result;
+    }
+
+    private static int DotnetPublishWasm(string project, string outDir, string gameCode, Action<string> log)
+    {
+        var psi = new ProcessStartInfo(Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? "").Equals("dotnet", StringComparison.OrdinalIgnoreCase) ? Environment.ProcessPath! : "dotnet")
+        {
+            WorkingDirectory = Path.GetDirectoryName(project)!,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        foreach (var a in new[] { "publish", project, "-c", "Release", "-o", outDir, "-nologo", "-p:DebugType=None", "-p:DebugSymbols=false" })
+            psi.ArgumentList.Add(a);
+        if (gameCode.Length > 0) psi.ArgumentList.Add("-p:GameCode=" + gameCode);
+        // build the web project for the same .NET the editor runs on (without this it always asks for net11.0 and fails on .NET 8)
+        psi.ArgumentList.Add("-p:SharpTfm=" + (Environment.Version.Major >= 11 ? "net11.0" : "net8.0"));
+
+        using var process = Process.Start(psi) ?? throw new InvalidOperationException("Could not start dotnet.");
+        process.OutputDataReceived += (_, e) => { if (e.Data is not null) log(e.Data); };
+        process.ErrorDataReceived += (_, e) => { if (e.Data is not null) log(e.Data); };
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+        process.WaitForExit();
+        return process.ExitCode;
+    }
+
+    // ---- a tiny local web server so "Run" works (browsers do not run WebAssembly from file://) ----
+
+    private static HttpListener? _listener;
+
+    /// <summary>Serves a folder on http://localhost:&lt;port&gt;/ (replaces an earlier server). Returns the address.</summary>
+    public static string ServeLocally(string folder)
+    {
+        try { _listener?.Close(); } catch (Exception) { }
+        for (int port = 8080; port < 8100; port++)
+        {
+            var listener = new HttpListener();
+            listener.Prefixes.Add($"http://localhost:{port}/");
+            try { listener.Start(); }
+            catch (HttpListenerException) { listener.Close(); continue; }
+            _listener = listener;
+            string root = Path.GetFullPath(folder);
+            string token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));   // secret of this server: the browser code editor needs it
+            int boundPort = port;
+            SetWebEditorUrl($"http://localhost:{port}/__editor?t={token}");
+            Task.Run(() =>
+            {
+                while (listener.IsListening)
+                {
+                    HttpListenerContext ctx;
+                    try { ctx = listener.GetContext(); } catch (Exception) { return; }
+                    try { if (!HandleWebEditor(ctx, boundPort, token)) Respond(ctx, root, token); } catch (Exception) { try { ctx.Response.Abort(); } catch (Exception) { } }
+                }
+            });
+            return $"http://localhost:{port}/";
+        }
+        throw new IOException("No free port between 8080 and 8099.");
+    }
+
+    private static void Respond(HttpListenerContext ctx, string root, string token = "")
+    {
+        string rel = Uri.UnescapeDataString(ctx.Request.Url!.AbsolutePath).TrimStart('/');
+        if (rel.Length == 0) rel = "index.html";
+        string full = Path.GetFullPath(Path.Combine(root, rel));
+        if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !File.Exists(full))
+        {
+            ctx.Response.StatusCode = 404;
+            ctx.Response.Close();
+            return;
+        }
+        ctx.Response.ContentType = Path.GetExtension(full).ToLowerInvariant() switch
+        {
+            ".html" => "text/html", ".js" or ".mjs" => "text/javascript", ".json" => "application/json", ".wasm" => "application/wasm",
+            ".css" => "text/css", ".png" => "image/png", ".jpg" or ".jpeg" => "image/jpeg", ".dll" or ".pdb" => "application/octet-stream",
+            _ => "application/octet-stream"
+        };
+        var bytes = File.ReadAllBytes(full);
+        if (token.Length > 0 && string.Equals(rel, "index.html", StringComparison.OrdinalIgnoreCase) && Directory.Exists(Path.Combine(root, "_framework"))) bytes = InjectEditorLink(bytes, token);   // the "Code editor" button (local server only)
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.Close();
+    }
+}

@@ -1,0 +1,365 @@
+using System.Numerics;
+using Raylib_cs;
+using Rl = Raylib_cs.Raylib;
+
+namespace SharpEngine.Graphics3D.Editor;
+
+/// <summary>
+/// The world as a grid of chunks. Every chunk is one scene with its own size; adding a scene adds a chunk and the
+/// map grows. Select a chunk to change its size, drag it to another cell, or open it to edit that scene's world.
+/// </summary>
+public static class WorldMapWindow
+{
+    private static readonly Color Body = new(40, 42, 48, 255);
+    private static readonly Color Well = new(26, 27, 31, 255);
+    private static readonly Color Line = new(18, 19, 22, 255);
+    private static readonly Color Empty = new(52, 55, 63, 255);
+    private static readonly Color InBuild = new(52, 110, 84, 255);
+    private static readonly Color NotInBuild = new(78, 82, 94, 255);
+    private static readonly Color Editing = new(60, 110, 190, 255);
+    private static readonly Color Bad = new(240, 120, 120, 255);
+    private static readonly Color Good = new(120, 215, 130, 255);
+
+    private static string? _selected;
+    private static string _info = "";
+    private static Color _infoColor = Good;
+
+    // dragging a chunk
+    private static string? _dragScene;
+    private static Vector2 _dragFrom;
+    private static bool _dragging;
+
+    public static bool IsOpen { get; private set; }
+
+    public static void Open()
+    {
+        IsOpen = true;
+        _info = "";
+        _dragScene = null; _dragging = false;
+        WorldLayout.Sync();
+        _selected ??= SceneManager.CurrentName;
+    }
+
+    public static void Close() => IsOpen = false;
+
+    private static void Info(string text, bool error = false) { _info = text; _infoColor = error ? Bad : Good; }
+
+    public static void Draw(World world)
+    {
+        if (!IsOpen) return;
+
+        float sw = Gui.ScreenWidth, sh = Gui.ScreenHeight;
+        float w = MathF.Min(sw - 40f, 980f), h = MathF.Min(sh - 40f, 660f);
+        var d = new Rectangle((sw - w) / 2f, (sh - h) / 2f, w, h);
+
+        Rl.DrawRectangle(0, 0, (int)sw, (int)sh, new Color(0, 0, 0, 130));
+        Rl.DrawRectangleRec(new Rectangle(d.X + 5, d.Y + 6, d.Width, d.Height), new Color(0, 0, 0, 100));
+        Rl.DrawRectangleRec(d, Body);
+        Rl.DrawRectangleLinesEx(d, 1f, Line);
+
+        // title bar
+        Rl.DrawRectangleRec(new Rectangle(d.X, d.Y, d.Width, 40), new Color(242, 242, 242, 255));
+        Gui.TextSized(d.X + 12, d.Y + 8, "World Map", 26, new Color(100, 100, 100, 255));
+        var close = new Rectangle(d.X + d.Width - 40, d.Y + 6, 28, 28);
+        bool closeHover = Gui.IsHot(close);
+        Rl.DrawRectangleRec(close, closeHover ? new Color(205, 205, 205, 255) : new Color(226, 226, 226, 255));
+        var xc = new Color(150, 150, 150, 255);
+        Rl.DrawLineEx(new Vector2(close.X + 8, close.Y + 8), new Vector2(close.X + 20, close.Y + 20), 2f, xc);
+        Rl.DrawLineEx(new Vector2(close.X + 20, close.Y + 8), new Vector2(close.X + 8, close.Y + 20), 2f, xc);
+        if (closeHover && Gui.LeftPressed) Close();
+
+        float sideW = 270f;
+        var map = new Rectangle(d.X + 12, d.Y + 52, d.Width - sideW - 36, d.Height - 52 - 54);
+        var side = new Rectangle(map.X + map.Width + 12, map.Y, sideW, map.Height);
+
+        DrawMap(world, map);
+        DrawSide(world, side);
+        DrawFooter(d);
+
+        if (Rl.IsKeyPressed(KeyboardKey.Escape) && !Gui.PopupOpen && !Gui.IsEditing && !CodeEditorWindow.IsOpen) Close();
+    }
+
+    // ---- sizes (the open scene lives in the World, the others in their files) ----------------------------
+
+    private static (float X, float Z) SizeOf(World world, string scene) =>
+        string.Equals(scene, SceneManager.CurrentName, StringComparison.OrdinalIgnoreCase) ? (world.SizeX, world.SizeZ) : WorldLayout.SizeOf(scene);
+
+    private static void SetSize(World world, string scene, float x, float z)
+    {
+        if (string.Equals(scene, SceneManager.CurrentName, StringComparison.OrdinalIgnoreCase)) { world.SizeX = x; world.SizeZ = z; }
+        else
+        {
+            try { WorldLayout.SetSizeInFile(scene, x, z); }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or System.Text.Json.JsonException or UnauthorizedAccessException)
+            { Info("Could not change the size: " + ex.Message, error: true); }
+        }
+    }
+
+    // ---- the map ------------------------------------------------------------------------------------------
+
+    private static void DrawMap(World world, Rectangle area)
+    {
+        Rl.DrawRectangleRec(area, Well);
+        Rl.DrawRectangleLinesEx(area, 1f, Line);
+
+        var (minX, minY, maxX, maxY) = WorldLayout.Extent();
+        // one empty ring around the world: that is where the next scene can go (the map grows when you use it)
+        minX--; minY--; maxX++; maxY++;
+        int cols = maxX - minX + 1, rows = maxY - minY + 1;
+        float cell = MathF.Min(MathF.Min((area.Width - 16) / cols, (area.Height - 16) / rows), 150f);
+        float gx = area.X + (area.Width - cell * cols) / 2f, gy = area.Y + (area.Height - cell * rows) / 2f;
+
+        float cellUnits = WorldLayout.CellSize(s => SizeOf(world, s));
+        Func<int, int, Rectangle> CellRect = (cx, cy) => new Rectangle(gx + (cx - minX) * cell, gy + (cy - minY) * cell, cell, cell);
+
+        Gui.SetScope(7700);
+        string? hoverScene = null;
+        (int X, int Y)? hoverCell = null;
+
+        for (int cy = minY; cy <= maxY; cy++)
+            for (int cx = minX; cx <= maxX; cx++)
+            {
+                var rc = CellRect(cx, cy);
+                var inner = new Rectangle(rc.X + 2, rc.Y + 2, rc.Width - 4, rc.Height - 4);
+                bool hot = Gui.IsHot(inner) && Rl.CheckCollisionPointRec(Gui.Mouse, area);
+                if (hot) hoverCell = (cx, cy);
+
+                var chunk = WorldLayout.At(cx, cy);
+                if (chunk is null)
+                {
+                    Rl.DrawRectangleRec(inner, hot ? new Color(66, 70, 82, 255) : Empty with { A = 120 });
+                    Rl.DrawRectangleLinesEx(inner, 1f, new Color(70, 74, 86, 255));
+                    if (cell >= 30) Gui.TextCentered(inner, _dragging ? "drop" : "+", new Color(150, 154, 162, 255));
+                    continue;
+                }
+
+                if (hot) hoverScene = chunk.Scene;
+                var (sx, sz) = SizeOf(world, chunk.Scene);
+                float fw = Math.Clamp(sx / cellUnits, 0.15f, 1f) * inner.Width, fh = Math.Clamp(sz / cellUnits, 0.15f, 1f) * inner.Height;
+                var body = new Rectangle(inner.X + (inner.Width - fw) / 2f, inner.Y + (inner.Height - fh) / 2f, fw, fh);
+
+                bool current = string.Equals(chunk.Scene, SceneManager.CurrentName, StringComparison.OrdinalIgnoreCase);
+                bool inBuild = SceneManager.Config.Scenes.Any(s => s.Enabled && string.Equals(SceneManager.NameOf(s.Path), chunk.Scene, StringComparison.OrdinalIgnoreCase));
+                var col = current ? Editing : inBuild ? InBuild : NotInBuild;
+                Rl.DrawRectangleRec(inner, new Color(36, 38, 44, 255));
+                Rl.DrawRectangleRec(body, hot ? Brighten(col) : col);
+                bool selected = string.Equals(chunk.Scene, _selected, StringComparison.OrdinalIgnoreCase);
+                Rl.DrawRectangleLinesEx(body, selected ? 3f : 1f, selected ? Color.White : new Color(20, 20, 24, 255));
+
+                if (WorldLayout.GroupOf(chunk.Scene) is { } grp)
+                {
+                    var gc = GroupColor(grp.Name);
+                    Rl.DrawRectangleLinesEx(inner, 2f, gc);
+                    if (cell >= 54) Gui.TextSized(inner.X + 4, inner.Y + inner.Height - 17, Gui.FitText("[" + grp.Name + "]", inner.Width - 8), Gui.FontSize - 3, gc);
+                }
+
+                if (cell >= 54)
+                {
+                    Gui.TextSized(body.X + 5, body.Y + 4, Gui.FitText(chunk.Scene, body.Width - 8), Gui.FontSize - 2, Color.White);
+                    if (body.Height > 38) Gui.TextSized(body.X + 5, body.Y + 22, $"{sx:0.#} x {sz:0.#}", Gui.FontSize - 3, new Color(225, 228, 235, 255));
+                    if (current && body.Height > 56) Gui.TextSized(body.X + 5, body.Y + 38, "editing", Gui.FontSize - 3, new Color(210, 230, 255, 255));
+                }
+            }
+
+        // mouse: click selects, drag moves, click on an empty cell makes a new scene there
+        if (hoverCell is { } hc)
+        {
+            if (Gui.LeftPressed && hoverScene is not null) { _dragScene = hoverScene; _dragFrom = Gui.Mouse; _dragging = false; _selected = hoverScene; }
+            else if (Gui.LeftPressed && hoverScene is null && !Gui.Busy) { CreateAt(world, hc.X, hc.Y); }
+        }
+        if (_dragScene is not null)
+        {
+            if (Gui.LeftDown && Vector2.Distance(Gui.Mouse, _dragFrom) > 6f) _dragging = true;
+            if (_dragging)
+            {
+                var ghost = new Rectangle(Gui.Mouse.X + 10, Gui.Mouse.Y + 8, Rl.MeasureText(_dragScene, Gui.FontSize) + 16, Gui.Row);
+                Rl.DrawRectangleRec(ghost, Gui.Accent with { A = 230 });
+                Gui.TextLeft(ghost, _dragScene, Color.White, 8);
+            }
+            if (!Gui.LeftDown)
+            {
+                if (_dragging && hoverCell is { } to)
+                {
+                    WorldLayout.Place(_dragScene, to.X, to.Y);
+                    Info($"Moved {_dragScene} to cell {to.X}, {to.Y}.");
+                }
+                _dragScene = null; _dragging = false;
+            }
+        }
+
+        // double click = open
+        if (hoverScene is not null && Gui.LeftPressed && Rl.IsMouseButtonPressed(MouseButton.Left) && Rl.GetTime() - _lastClickTime < 0.35 && _lastClickScene == hoverScene)
+        {
+            _dragScene = null; _dragging = false;
+            OpenScene(world, hoverScene);
+        }
+        if (Gui.LeftPressed) { _lastClickTime = Rl.GetTime(); _lastClickScene = hoverScene; }
+    }
+
+    private static double _lastClickTime;
+    private static string? _lastClickScene;
+
+    /// <summary>Every merge group gets its own colour (from its name) so groups can be told apart on the map.</summary>
+    private static Color GroupColor(string name)
+    {
+        int h = 17;
+        foreach (char c in name) h = h * 31 + c;
+        var palette = new[] { new Color(200, 120, 255, 255), new Color(255, 190, 70, 255), new Color(80, 210, 230, 255), new Color(255, 120, 150, 255), new Color(150, 230, 90, 255) };
+        return palette[(h & 0x7fffffff) % palette.Length];
+    }
+
+    private static Color Brighten(Color c) => new(Math.Min(255, c.R + 25), Math.Min(255, c.G + 25), Math.Min(255, c.B + 25), c.A);
+
+    private static void CreateAt(World world, int x, int y)
+    {
+        try
+        {
+            string name = SceneManager.CreateSceneFile("NewScene");
+            WorldLayout.Place(name, x, y);
+            if (!SceneManager.Config.Scenes.Any(s => string.Equals(SceneManager.NameOf(s.Path), name, StringComparison.OrdinalIgnoreCase)))
+            {
+                SceneManager.Config.Scenes.Add(new BuildScene { Path = SceneManager.BuildPathFor(name), Enabled = true });
+                SceneManager.SaveConfig();
+            }
+            _selected = name;
+            Info($"Created {name} on cell {x}, {y} and added it to the build.");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Info("Could not create the scene: " + ex.Message, error: true);
+        }
+    }
+
+    private static void OpenScene(World world, string scene)
+    {
+        Close();
+        AdminEditor.OpenSceneFromMap(world, scene);
+    }
+
+    // ---- selected chunk -----------------------------------------------------------------------------------
+
+    private static void DrawSide(World world, Rectangle r)
+    {
+        Rl.DrawRectangleRec(r, Well);
+        Rl.DrawRectangleLinesEx(r, 1f, Line);
+        float x = r.X + 12, y = r.Y + 10, w = r.Width - 24;
+
+        var (ww, wd) = WorldLayout.WorldSize(s => SizeOf(world, s));
+        Gui.TextSized(x, y, "World", 18, Color.White, bold: true); y += 24;
+        Gui.TextSized(x, y, $"{WorldLayout.Chunks.Count} scene(s), {ww:0.#} x {wd:0.#} units", 15, new Color(190, 194, 202, 255)); y += 20;
+        Gui.TextSized(x, y, "Grows when you add a scene.", 14, Gui.TextDim); y += 24;
+
+        // streaming: while playing, neighbouring chunks are loaded around the player at their map positions
+        Gui.SetScope(7790);
+        var cfgS = SceneManager.Config;
+        bool stream = cfgS.StreamWorld;
+        bool streamChanged = Gui.Checkbox(new Rectangle(x, y, w, 22), "stream", "Stream neighbours (play)", ref stream);
+        y += 26;
+        if (stream)
+        {
+            Gui.Text(x, y + 2, "Load radius", Gui.TextDim);
+            float rad = cfgS.StreamRadius;
+            if (Gui.FloatField(new Rectangle(x + 100, y, w - 100, Gui.Row), "radius", ref rad, 0.1f, integer: true))
+            { cfgS.StreamRadius = Math.Clamp((int)rad, 0, 4); streamChanged = true; }
+            y += Gui.Row + 4;
+        }
+        if (streamChanged)
+        {
+            cfgS.StreamWorld = stream;
+            try { SceneManager.SaveConfig(); } catch (IOException) { Info("Could not save BuildSettings.json", error: true); }
+        }
+        y += 8;
+
+        if (_selected is null || WorldLayout.Of(_selected) is null)
+        {
+            Gui.TextSized(x, y, "Click a chunk to select it.", 15, Gui.TextDim);
+            Gui.TextSized(x, y + 20, "Click a + cell for a new scene.", 15, Gui.TextDim);
+            return;
+        }
+
+        string scene = _selected;
+        var chunk = WorldLayout.Of(scene)!;
+        Gui.SetScope(7800);
+        Gui.TextSized(x, y, scene, 20, Color.White, bold: true); y += 28;
+        Gui.TextSized(x, y, $"cell {chunk.X}, {chunk.Y}", 14, Gui.TextDim); y += 24;
+
+        var (sx, sz) = SizeOf(world, scene);
+        Gui.Text(x, y + 2, "Width (X)", Gui.TextDim);
+        var f1 = new Rectangle(x + 100, y, w - 100, Gui.Row);
+        bool changed = Gui.FloatField(f1, "sizex", ref sx, 1f); y += Gui.Row + 6;
+        Gui.Text(x, y + 2, "Depth (Z)", Gui.TextDim);
+        var f2 = new Rectangle(x + 100, y, w - 100, Gui.Row);
+        changed |= Gui.FloatField(f2, "sizez", ref sz, 1f); y += Gui.Row + 10;
+        if (changed) SetSize(world, scene, Math.Clamp(sx, World.MinSize, World.MaxSize), Math.Clamp(sz, World.MinSize, World.MaxSize));
+
+        bool current = string.Equals(scene, SceneManager.CurrentName, StringComparison.OrdinalIgnoreCase);
+        if (Gui.Button(new Rectangle(x, y, w, 30), current ? "Editing this world" : "Edit This World", selected: false, enabled: !current))
+            OpenScene(world, scene);
+        y += 38;
+
+        bool inBuild = SceneManager.Config.Scenes.Any(s => string.Equals(SceneManager.NameOf(s.Path), scene, StringComparison.OrdinalIgnoreCase) && s.Enabled);
+        bool tick = inBuild;
+        if (Gui.Checkbox(new Rectangle(x, y, w, 22), "inbuild", "In build (player can enter it)", ref tick))
+        {
+            var cfg = SceneManager.Config;
+            var existing = cfg.Scenes.FirstOrDefault(s => string.Equals(SceneManager.NameOf(s.Path), scene, StringComparison.OrdinalIgnoreCase));
+            if (existing is null) cfg.Scenes.Add(new BuildScene { Path = SceneManager.BuildPathFor(scene), Enabled = true });
+            else existing.Enabled = tick;
+            try { SceneManager.SaveConfig(); } catch (IOException) { Info("Could not save BuildSettings.json", error: true); }
+        }
+        y += 30;
+
+        // merge group: scenes of one group can be joined into one bigger scene while playing
+        Gui.SetScope(7810);
+        Gui.Text(x, y + 2, "Merge group", Gui.TextDim);
+        string groupName = WorldLayout.GroupOf(scene)?.Name ?? "";
+        if (Gui.TextField(new Rectangle(x + 100, y, w - 100, Gui.Row), "group", ref groupName, placeholder: "none"))
+            WorldLayout.SetGroupOf(scene, groupName);
+        y += Gui.Row + 4;
+        if (WorldLayout.GroupOf(scene) is { } group)
+        {
+            bool auto = group.Auto;
+            if (Gui.Checkbox(new Rectangle(x, y, w, 22), "auto", "Merge automatically in play", ref auto)) WorldLayout.SetGroupAuto(group.Name, auto);
+            y += 24;
+            Gui.TextSized(x, y, Gui.FitText(string.Join(" + ", group.Scenes), w), 14, Gui.TextDim);
+            y += 20;
+            Gui.TextSized(x, y, Gui.FitText(auto ? "These scenes act as one big scene." : "Merge from code or a portal (Mode: Merge).", w), 14, Gui.TextDim);
+            y += 22;
+        }
+        else
+        {
+            Gui.TextSized(x, y, Gui.FitText("Same name = scenes that can merge.", w), 14, Gui.TextDim);
+            y += 22;
+        }
+
+        if (current && Gui.Button(new Rectangle(x, y, w, 26), "Fit Ground To Size"))
+        {
+            var ground = world.Find("Ground");
+            if (ground is null) Info("This scene has no object named Ground.", error: true);
+            else { ground.Transform.Scale = new Vector3(world.SizeX, ground.Transform.Scale.Y, world.SizeZ); Info("Ground resized."); }
+        }
+    }
+
+    private static void DrawFooter(Rectangle d)
+    {
+        float y = d.Y + d.Height - 42f;
+        Gui.SetScope(7900);
+        if (Gui.Button(new Rectangle(d.X + 12, y, 130, 28), "New Scene"))
+        {
+            var (x, yy) = FreeCell();
+            CreateAt(null!, x, yy);
+        }
+        if (Gui.Button(new Rectangle(d.X + 150, y, 130, 28), "World Code")) CodeEditorWindow.OpenWorld();
+        Gui.TextSized(d.X + 296, y + 6, Gui.FitText(_info.Length > 0 ? _info : "Drag a chunk to move it. Double-click to edit that scene as its own world.", d.Width - 320), 15,
+            _info.Length > 0 ? _infoColor : Gui.TextDim);
+    }
+
+    private static (int X, int Y) FreeCell()
+    {
+        var (minX, minY, maxX, maxY) = WorldLayout.Extent();
+        for (int cy = minY; cy <= maxY + 1; cy++)
+            for (int cx = minX; cx <= maxX + 1; cx++)
+                if (WorldLayout.At(cx, cy) is null) return (cx, cy);
+        return (maxX + 1, minY);
+    }
+}

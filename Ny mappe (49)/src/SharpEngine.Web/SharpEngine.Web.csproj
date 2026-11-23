@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk.BlazorWebAssembly">
+
+  <!--
+    The real SharpEngine in the browser: the same C# World, scenes, streaming, portals, components and your game scripts,
+    compiled to WebAssembly. Only drawing (WebGL, wwwroot/sharp.js) and input (DOM events) are different.
+    The editor build (Build Settings > WebAssembly) publishes this project for you:
+        dotnet publish src/SharpEngine.Web -c Release
+  -->
+  <PropertyGroup>
+    <TargetFramework>$(SharpTfm)</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>preview</LangVersion>
+    <RootNamespace>SharpEngine.Web</RootNamespace>
+    <AssemblyName>SharpEngine.Web</AssemblyName>
+    <DefineConstants>$(DefineConstants);SHARP_WEB</DefineConstants>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <BlazorEnableCompression>true</BlazorEnableCompression>
+    <WasmEnableThreads>false</WasmEnableThreads>
+    <!-- the .NET IL trimmer must keep the components: scenes create them by name through reflection -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="$(SharpWebPkg)" />
+    <!-- only for the Color / KeyboardKey / Camera structs. Its native library is never loaded in the browser. -->
+    <PackageReference Include="Raylib-cs" Version="7.0.1" />
+  </ItemGroup>
+
+  <!-- the engine's source files, minus everything that needs a window or the editor -->
+  <ItemGroup>
+    <Compile Include="..\SharpEngine.Graphics3D\**\*.cs" Exclude="..\SharpEngine.Graphics3D\obj\**;..\SharpEngine.Graphics3D\bin\**;..\SharpEngine.Graphics3D\App3D.cs;..\SharpEngine.Graphics3D\Scripting\**;..\SharpEngine.Graphics3D\Editor\**" LinkBase="Engine" />
+    <Compile Include="..\SharpEngine.Graphics3D\Editor\SceneSerializer.cs;..\SharpEngine.Graphics3D\Editor\ComponentRegistry.cs" LinkBase="Engine\Editor" />
+    <Compile Include="*.cs" />
+  </ItemGroup>
+
+  <!-- your game's own components (Scripts folder and the game project's .cs files); set by the editor's WebAssembly build -->
+  <ItemGroup Condition="'$(GameCode)' != ''">
+    <Compile Include="$(GameCode)" LinkBase="Game" />
+  </ItemGroup>
+
+</Project>

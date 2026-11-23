@@ -1,0 +1,35 @@
+# Rendering and web export
+
+GPU renderer, WebGL single file and the real engine as WebAssembly.
+
+## More triangles (GPU renderer)
+
+Meshes are uploaded to the graphics card once (split into pieces of at most 65,535 vertices), lit by a shader and skipped
+when they are outside the camera's view. A million triangles is fine. The status bar shows `N tris (+M culled) | GPU`.
+If the shader cannot be created the old CPU renderer is used (`| CPU`). `GpuRenderer.Enabled = false` forces the CPU path.
+The browser player still uses its own renderer.
+
+## WebGL build
+In Build Settings pick **WebGL** in the Platform list, then Build (or Build And Run, which opens it in your browser).
+The output folder (`Builds/<Product>_WebGL`) holds `index.html`, `player.js` and `data.js`; open `index.html`
+or upload the folder to any web host. The browser player renders your scenes (meshes, lighting, sky, grid),
+fly camera, scene switching (Tab / Shift+Tab / 1-9) and the built-in `ScenePortal`, `Spinner`, `Bobber` and
+`SunOrbit` components. Your own C# scripts cannot run in the browser; they are listed as warnings in `Builds/last-build.log`.
+
+## WebGL: one file, paste and play
+
+A WebGL build's `index.html` is now self-contained, and `game.html` is an identical copy: the whole game (player, scenes, meshes, textures) in ONE file. Open it directly (no web server needed), upload just that file anywhere, or paste its full text into an online HTML editor (CodePen, JSFiddle, ...) to get a link. Build it from Build Settings > WebGL.
+
+## The real engine in the browser (WebAssembly)
+
+Build Settings > platform **WebGL** now has a **Web Engine** dropdown:
+
+- **Real engine (WebAssembly)** (default): your actual C# engine runs in the browser: the same World, scenes, streaming, portals, components and your own scripts. Only the drawing (WebGL, `src/SharpEngine.Web/wwwroot/sharp.js`) and the input (DOM events) are different.
+- **Lite (JavaScript)**: the small JavaScript copy from before. No C# scripts, but it opens by double-click.
+
+How it works: the build runs `dotnet publish src/SharpEngine.Web` (the engine sources plus your Scripts/ and the game project's .cs files are compiled to WebAssembly), then adds `game/` (scenes, WorldMap.json, BuildSettings.json, textures, models). The page downloads those files into the browser's in-memory file system and starts the game.
+
+- The first build downloads the .NET WebAssembly runtime (needs internet and a few minutes). Later builds are fast.
+- The result is a static website: upload the folder to itch.io (HTML5), GitHub Pages, Netlify or any server. It cannot be opened by double-clicking (browsers do not run WebAssembly from files). **Run** in Build Settings starts a small local server and opens the page; `Play.cmd` in the output does the same with Python.
+- Scripts must not call Raylib directly (`Rl.*`), because there is no window in the browser. Use `KeyEvents.WasPressed(KeyboardKey.X)` or the engine's own classes. The built-in `FlyCamera`, `ScenePortal` and the sample scripts already do.
+- Your game's own .cs files are included, except the one that calls `App3D.Run` or has `Main`.

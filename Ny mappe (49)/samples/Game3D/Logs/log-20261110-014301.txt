@@ -1,0 +1,31 @@
+﻿SharpEngine log report
+======================
+Created : 2026-11-10 01:43:01
+Scene   : NewScene1
+Project : C:\Games\SharpEngine\samples\Game3D
+System  : .NET 11.0.0-rc.3.26522.148, Microsoft Windows 10.0.26200
+Summary : 0 error(s), 2 warning(s), 7 message(s)
+
+COMPILE PROBLEMS (latest build)
+-------------------------------
+1. WARNING CS0162   _1.cs  line 190, column 31
+   Unreachable code detected
+     190 |                     if (Is2D) dy = fx.DirB * step;
+                                         ^
+
+2. WARNING CS0162   _1.cs  line 205, column 27
+   Unreachable code detected
+     205 |                 if (Is2D) obj.Transform.Rotate(new Vector3(0f, 0f, spin));
+                                     ^
+
+LOG (oldest first)
+------------------
+[01:30:16] info    Kingdom Social: [Kingdom Social] System started (v3 - visual effects)
+[01:30:16] info    Kingdom Social: [Kingdom Social] Loaded. Personal Bonds: 0 | Kingdom Relations: 0 | NPCs tracked: 0
+[01:30:16] info    Kingdom: [Kingdom] Scene loaded: NewScene
+[01:30:27] info    Kingdom Social: [Kingdom Social] Stopped
+[01:30:27] info    console: Personal Bonds: 0 | Kingdom Relations: 0 | NPCs tracked: 0
+[01:30:27] info    Kingdom Social: [Kingdom Social] Saved -> C:\Games\SharpEngine\samples\Game3D\bin\Debug\net11.0\relationships.json
+[01:39:50] WARNING compiler: _1.cs(190,31)  CS0162: Unreachable code detected
+[01:39:50] WARNING compiler: _1.cs(205,27)  CS0162: Unreachable code detected
+[01:39:50] info    compiler: Compiled 2 file(s) in 88 ms: no components

@@ -1,0 +1,16 @@
+<Project>
+  <!--
+    One place that decides which .NET everything targets. net11.0 (preview) gives C# 15 incl. union types.
+    No .NET 11 SDK yet?  Add  -p:SharpTfm=net8.0  to dotnet run / build / publish to use the old one.
+  -->
+  <PropertyGroup>
+    <SharpTfm Condition="'$(SharpTfm)' == ''">net11.0</SharpTfm>
+    <TargetFramework>$(SharpTfm)</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <!-- the .NET 11 SDK's own Roslyn knows C# 15; the NuGet package may lag behind -->
+    <UseSdkRoslyn Condition="'$(UseSdkRoslyn)' == '' and '$(SharpTfm)' == 'net11.0'">true</UseSdkRoslyn>
+    <SharpWebPkg Condition="'$(SharpTfm)' == 'net11.0'">11.0.0-*</SharpWebPkg>
+    <SharpWebPkg Condition="'$(SharpWebPkg)' == ''">8.0.0</SharpWebPkg>
+    <NuGetAudit>false</NuGetAudit>
+  </PropertyGroup>
+</Project>

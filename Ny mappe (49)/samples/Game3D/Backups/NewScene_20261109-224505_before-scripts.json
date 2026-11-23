@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "settings": {
+    "sunDirection": [
+      -0.4267896,
+      -0.8535792,
+      -0.29875273
+    ],
+    "sunColor": [
+      255,
+      244,
+      222,
+      255
+    ],
+    "sunIntensity": 1,
+    "ambient": 0.28,
+    "skyTop": [
+      70,
+      120,
+      200,
+      255
+    ],
+    "skyBottom": [
+      190,
+      215,
+      240,
+      255
+    ],
+    "showGrid": true,
+    "showAxes": true,
+    "sizeX": 60,
+    "sizeZ": 60,
+    "showBounds": true,
+    "clampCamera": true
+  },
+  "objects": [
+    {
+      "name": "Main Camera",
+      "active": true,
+      "position": [
+        7.6213856,
+        4,
+        9
+      ],
+      "rotation": [
+        -15.501359,
+        33.690067,
+        0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "components": [
+        {
+          "type": "CameraComponent",
+          "properties": {
+            "Enabled": true,
+            "FieldOfView": 60
+          }
+        },
+        {
+          "type": "FlyCamera",
+          "properties": {
+            "Enabled": true,
+            "Speed": 6,
+            "FastMultiplier": 3,
+            "Sensitivity": 0.12
+          }
+        }
+      ]
+    },
+    {
+      "name": "Ground",
+      "active": true,
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        60,
+        1,
+        60
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "ModelPart": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "PrimitiveName": "Ground",
+            "Tint": [
+              255,
+              255,
+              255,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0,
+            "Shininess": 32
+          }
+        }
+      ]
+    }
+  ]
+}

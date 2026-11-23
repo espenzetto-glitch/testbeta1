@@ -1,0 +1,28 @@
+{
+  "chunks": [
+    {
+      "scene": "NewScene2",
+      "x": 1,
+      "y": -1
+    },
+    {
+      "scene": "NewScene",
+      "x": 0,
+      "y": 0
+    },
+    {
+      "scene": "NewScene1",
+      "x": 1,
+      "y": 0
+    }
+  ],
+  "groups": [
+    {
+      "name": "ww",
+      "auto": false,
+      "scenes": [
+        "NewScene1"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "settings": {
+    "sunDirection": [
+      -0.4267896,
+      -0.8535792,
+      -0.29875273
+    ],
+    "sunColor": [
+      170,
+      190,
+      255,
+      255
+    ],
+    "sunIntensity": 0.55,
+    "ambient": 0.18,
+    "skyTop": [
+      8,
+      10,
+      30,
+      255
+    ],
+    "skyBottom": [
+      40,
+      50,
+      90,
+      255
+    ],
+    "showGrid": true,
+    "showAxes": true,
+    "sizeX": 200,
+    "sizeZ": 200,
+    "showBounds": true,
+    "clampCamera": false
+  },
+  "objects": [
+    {
+      "name": "Main Camera",
+      "active": true,
+      "position": [
+        6,
+        4,
+        9
+      ],
+      "rotation": [
+        -0.62135863,
+        5.6100855,
+        0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "components": [
+        {
+          "type": "CameraComponent",
+          "properties": {
+            "Enabled": true,
+            "FieldOfView": 60
+          }
+        },
+        {
+          "type": "FlyCamera",
+          "properties": {
+            "Enabled": true,
+            "Speed": 6,
+            "FastMultiplier": 3,
+            "Sensitivity": 0.12
+          }
+        }
+      ]
+    }
+  ]
+}

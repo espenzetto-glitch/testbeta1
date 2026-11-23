@@ -1,0 +1,20 @@
+2026-10-31 22:26:20  code editor
+System.IndexOutOfRangeException: Index was outside the bounds of the array.
+   at SharpEngine.Graphics3D.Editor.CodeEditorWindow.DrawEditor(Rectangle r) in C:\Games\SharpEngine\src\SharpEngine.Graphics3D\Editor\CodeEditorWindow.cs:line 352
+   at SharpEngine.Graphics3D.Editor.CodeEditorWindow.DrawWindow(World world, Boolean editingAtStart) in C:\Games\SharpEngine\src\SharpEngine.Graphics3D\Editor\CodeEditorWindow.cs:line 219
+   at SharpEngine.Graphics3D.Editor.CodeEditorWindow.Draw(World world) in C:\Games\SharpEngine\src\SharpEngine.Graphics3D\Editor\CodeEditorWindow.cs:line 176
+
+2026-11-03 01:12:58  code editor
+System.IndexOutOfRangeException: Index was outside the bounds of the array.
+   at SharpEngine.Graphics3D.Editor.CodeEditorWindow.DrawEditor(Rectangle r) in C:\Games\SharpEngine\src\SharpEngine.Graphics3D\Editor\CodeEditorWindow.cs:line 352
+   at SharpEngine.Graphics3D.Editor.CodeEditorWindow.DrawWindow(World world, Boolean editingAtStart) in C:\Games\SharpEngine\src\SharpEngine.Graphics3D\Editor\CodeEditorWindow.cs:line 219
+   at SharpEngine.Graphics3D.Editor.CodeEditorWindow.Draw(World world) in C:\Games\SharpEngine\src\SharpEngine.Graphics3D\Editor\CodeEditorWindow.cs:line 176
+
+2026-11-05 08:17:43  update
+System.InvalidOperationException: Collection was modified; enumeration operation may not execute.
+   at System.Collections.Generic.List`1.Enumerator.MoveNext()
+   at SharpEngine.Graphics3D.World.Flush() in C:\Games\SharpEngine\src\SharpEngine.Graphics3D\World.cs:line 407
+   at SharpEngine.Graphics3D.World.Update(Single dt) in C:\Games\SharpEngine\src\SharpEngine.Graphics3D\World.cs:line 168
+   at SharpEngine.Graphics3D.App3D.<>c__DisplayClass0_1.<Run>b__0() in C:\Games\SharpEngine\src\SharpEngine.Graphics3D\App3D.cs:line 43
+   at SharpEngine.Graphics3D.App3D.Guard(String where, World world, Action action) in C:\Games\SharpEngine\src\SharpEngine.Graphics3D\App3D.cs:line 79
+

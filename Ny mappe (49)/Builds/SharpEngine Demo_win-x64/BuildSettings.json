@@ -1,0 +1,30 @@
+{
+  "Scenes": [
+    {
+      "Path": "Scenes/NewScene",
+      "Enabled": true
+    }
+  ],
+  "StreamWorld": true,
+  "StreamRadius": 0,
+  "ProductName": "SharpEngine Demo",
+  "WindowWidth": 1280,
+  "WindowHeight": 720,
+  "StartFullscreen": true,
+  "SelfContained": true,
+  "Platform": "Standalone",
+  "WebEngine": "RealEngine",
+  "Target": "Windows",
+  "Architecture": "X64",
+  "DevelopmentBuild": true,
+  "CopyPdbFiles": false,
+  "CreateVisualStudioSolution": false,
+  "Compression": "Default",
+  "OutputFolder": "",
+  "EnabledScenes": [
+    {
+      "Path": "Scenes/NewScene",
+      "Enabled": true
+    }
+  ]
+}

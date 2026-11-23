@@ -1,0 +1,110 @@
+// =====================================================================================
+//  EngineAdapterTemplate.cs.txt   (rename to ChunkWorldAdapter.cs and add it to samples/Game3D or Graphics3D)
+//
+//  This is the ONLY part that touches your engine. I did not have your Graphics3D source, so every
+//  line marked  // ADAPT  uses a guessed name (World, GameObject, Transform, SceneFile ...).
+//  Replace those with your real API; the streaming logic itself lives in SharpEngine.Streaming and is tested.
+//
+//  Needs:  <ProjectReference Include="..\..\src\SharpEngine.Streaming\SharpEngine.Streaming.csproj" />
+// =====================================================================================
+using System.Numerics;
+using SharpEngine.Graphics3D;            // ADAPT: World, GameObject, Transform, SceneManager, CameraComponent
+using SharpEngine.Streaming;
+
+namespace SharpEngine.Graphics3D.Streaming;
+
+/// <summary>Parsed scene file: plain data only, safe to create on a background thread.</summary>
+public sealed class ParsedScene
+{
+    public List<object> Objects = new();   // ADAPT: your scene's serialized object records (DTOs, not GameObjects)
+    public EnvironmentSettings Environment;
+}
+
+public sealed class SceneChunkBackend : IChunkBackend
+{
+    private readonly World _world;          // ADAPT: the one shared World all chunks live in
+    private readonly string _scenesDir;
+    public SceneChunkBackend(World world, string scenesDir) { _world = world; _scenesDir = scenesDir; }
+
+    // BACKGROUND THREAD: read + deserialize only. No GameObject / mesh / GL calls here.
+    public object Parse(string scene)
+    {
+        string json = File.ReadAllText(Path.Combine(_scenesDir, scene + ".json"));
+        return SceneSerializer.ParseToData(json);      // ADAPT: split your existing loader into parse (data) and instantiate (objects)
+    }
+
+    // MAIN THREAD: cheap, just make the root at the chunk's offset.
+    public IChunkBuild Begin(ChunkEntry chunk, object parsed, Vector3 offset)
+    {
+        var root = new GameObject("Chunk:" + chunk.Scene);   // ADAPT
+        root.Transform.Position = offset;                     // ADAPT: use your Transform position setter
+        _world.Add(root);                                     // ADAPT
+        return new Build(_world, root, (ParsedScene)parsed);
+    }
+
+    private sealed class Build : IChunkBuild
+    {
+        private readonly World _world; private readonly GameObject _root; private readonly ParsedScene _data; private int _next;
+        public Build(World w, GameObject r, ParsedScene d) { _world = w; _root = r; _data = d; }
+
+        public bool Step(ref int budget)
+        {
+            while (budget > 0 && _next < _data.Objects.Count)
+            {
+                var go = SceneSerializer.Instantiate(_data.Objects[_next++]);   // ADAPT: build one object (+ components, mesh, texture upload)
+                go.Transform.SetParent(_root, keepWorld: false);                // ADAPT: parent keeps the scene's LOCAL coordinates
+                budget--;
+            }
+            return _next >= _data.Objects.Count;
+        }
+
+        public void Dispose() => _world.Destroy(_root);   // ADAPT: must destroy the root and every child (and free GPU resources)
+    }
+}
+
+/// <summary>Drives streaming each frame: load/unload, camera clamp across the loaded area, lighting blend.</summary>
+public sealed class WorldStreamingController
+{
+    public ChunkStreamer Streamer { get; }
+    public float EnvironmentBlendDistance = 30f;
+
+    private readonly Dictionary<string, EnvironmentSettings> _env = new();
+
+    public WorldStreamingController(World world, string scenesDir, string worldMapJsonPath)
+    {
+        // Your WorldMap.json: FromJson accepts common shapes; if yours differs, build ChunkEntry objects from your WorldMap class instead.
+        var layout = WorldLayout.FromJson(File.ReadAllText(worldMapJsonPath));
+        Streamer = new ChunkStreamer(layout, new SceneChunkBackend(world, scenesDir),
+            new StreamerSettings { Radius = 1 /* 3x3 */, BorderHysteresis = 2f, ObjectsPerFrame = 64 });
+        Streamer.ChunkLoaded += c => { /* e.g. cache c's environment from its parsed data into _env[c.Scene] */ };
+    }
+
+    // Call from your Play-mode update (preview) or the player's update (build).
+    public void Update(CameraComponent camera)                       // ADAPT
+    {
+        Vector3 p = camera.Transform.Position;                       // ADAPT
+        Streamer.Update(p);                                          // 1) choose / load / unload chunks
+
+        camera.Transform.Position = Streamer.ClampToLoaded(p);       // 2) clamp to the whole loaded area (not one scene's rectangle)
+
+        var env = Streamer.EvaluateEnvironment(                      // 3) sky + sun from where the player stands, blended over distance
+            camera.Transform.Position,
+            c => _env.TryGetValue(c.Scene, out var e) ? e : default,
+            EnvironmentBlendDistance);
+        // ADAPT: push env into your sun / sky / ambient: World.Sun.Intensity = env.SunIntensity; World.Sky.Top = env.SkyTop; ...
+    }
+
+    // Portals: keep teleports for scene->scene jumps, or point a portal at a map cell.
+    public Vector3 PortalTargetForCell(Cell cell) =>
+        ChunkPlacement.Offset(cell, Streamer.Layout.CellSize) + new Vector3(0, 2, 0);   // put the camera over that chunk's origin
+}
+
+// ---- Editor hooks (AdminEditor) --------------------------------------------------------------
+// 1. Toolbar button "Preview Streaming": enter Play mode WITHOUT loading a single scene; create a WorldStreamingController;
+//    spawn the fly camera at the open scene's cell centre (ChunkPlacement.Offset(cellOfOpenScene, cellSize) + (0, 2, 0)).
+//    Stop => controller.Streamer.Clear() and restore the edited scene exactly as Stop does today.
+// 2. Normal editing is unchanged: double-clicking a chunk in the World Map still opens that scene alone at its own origin.
+// 3. World Map window: while previewing, draw a marker at
+//       cell = (p.X / cellSize (+0.5 for centre pivot), p.Z / cellSize (+0.5)) as fractional cell coordinates,
+//    i.e. markerX = mapOriginX + (p.X / cs + 0.5f) * cellPixels (centre pivot). Highlight Streamer.CenterCell and tint loaded cells.
+// 4. Add a "Streaming" block to Scene/World settings: Radius, Border Hysteresis, Objects Per Frame, Blend Distance.

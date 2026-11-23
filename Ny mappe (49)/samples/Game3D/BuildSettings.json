@@ -1,0 +1,46 @@
+{
+  "Scenes": [
+    {
+      "Path": "Scenes/NewScene",
+      "Enabled": true
+    },
+    {
+      "Path": "Scenes/NewScene1",
+      "Enabled": true
+    },
+    {
+      "Path": "Scenes/NewScene2",
+      "Enabled": true
+    }
+  ],
+  "StreamWorld": true,
+  "StreamRadius": 0,
+  "ProductName": "SharpEngine Demo",
+  "WindowWidth": 1280,
+  "WindowHeight": 720,
+  "StartFullscreen": true,
+  "SelfContained": true,
+  "Platform": "WebGL",
+  "WebEngine": "Lite",
+  "Target": "Windows",
+  "Architecture": "X64",
+  "DevelopmentBuild": true,
+  "CopyPdbFiles": false,
+  "CreateVisualStudioSolution": false,
+  "Compression": "Default",
+  "OutputFolder": "",
+  "EnabledScenes": [
+    {
+      "Path": "Scenes/NewScene",
+      "Enabled": true
+    },
+    {
+      "Path": "Scenes/NewScene1",
+      "Enabled": true
+    },
+    {
+      "Path": "Scenes/NewScene2",
+      "Enabled": true
+    }
+  ]
+}

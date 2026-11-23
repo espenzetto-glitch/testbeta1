@@ -1,0 +1,32 @@
+﻿SharpEngine log report
+======================
+Created : 2026-11-06 00:10:41
+Scene   : MainScene
+Project : C:\Games\SharpEngine\samples\Game3D
+System  : .NET 11.0.0-rc.3.26522.148, Microsoft Windows 10.0.26200
+Summary : 0 error(s), 3 warning(s), 2 message(s)
+
+COMPILE PROBLEMS (latest build)
+-------------------------------
+1. WARNING CS8632   Mmoworld.cs  line 184, column 35
+   The annotation for nullable reference types should only be used in code within a '#nullable' annotations context.
+     184 |     public static PlayerController? Instance;
+                                             ^
+
+2. WARNING CS8632   Mmoworld.cs  line 190, column 16
+   The annotation for nullable reference types should only be used in code within a '#nullable' annotations context.
+     190 |     private Bar? _hpBar, _mpBar;
+                          ^
+
+3. WARNING CS8632   Mmoworld.cs  line 303, column 16
+   The annotation for nullable reference types should only be used in code within a '#nullable' annotations context.
+     303 |     private Bar? _bar;
+                          ^
+
+LOG (oldest first)
+------------------
+[00:02:34] WARNING compiler: Mmoworld.cs(184,35)  CS8632: The annotation for nullable reference types should only be used in code within a '#nullable' annotations context.
+[00:02:34] WARNING compiler: Mmoworld.cs(190,16)  CS8632: The annotation for nullable reference types should only be used in code within a '#nullable' annotations context.
+[00:02:34] WARNING compiler: Mmoworld.cs(303,16)  CS8632: The annotation for nullable reference types should only be used in code within a '#nullable' annotations context.
+[00:02:34] info    compiler: Compiled 1 file(s) in 423 ms: Confetti, CrystalMesh, Loot, Mob, Npc, PlayerController, ZonePortal, ZoneSpawner
+[00:02:35] info    editor: Editor started. Script output, compiler results and errors appear here (Code window > Log).

@@ -1,0 +1,240 @@
+{
+  "version": 1,
+  "settings": {
+    "sunDirection": [
+      -0.4267896,
+      -0.8535792,
+      -0.29875273
+    ],
+    "sunColor": [
+      255,
+      244,
+      222,
+      255
+    ],
+    "sunIntensity": 1,
+    "ambient": 0.28,
+    "skyTop": [
+      70,
+      120,
+      200,
+      255
+    ],
+    "skyBottom": [
+      190,
+      215,
+      240,
+      255
+    ],
+    "showGrid": true,
+    "showAxes": true,
+    "sizeX": 8.5,
+    "sizeZ": 60,
+    "showBounds": true,
+    "clampCamera": true
+  },
+  "objects": [
+    {
+      "name": "Main Camera",
+      "active": true,
+      "position": [
+        -17.598955,
+        4.0578713,
+        -8.9835615
+      ],
+      "rotation": [
+        -4.581368,
+        308.97006,
+        0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "components": [
+        {
+          "type": "CameraComponent",
+          "properties": {
+            "Enabled": true,
+            "FieldOfView": 60
+          }
+        },
+        {
+          "type": "FlyCamera",
+          "properties": {
+            "Enabled": false,
+            "Speed": 6,
+            "FastMultiplier": 3,
+            "Sensitivity": 0.12
+          }
+        }
+      ]
+    },
+    {
+      "name": "Ground",
+      "active": true,
+      "position": [
+        0,
+        0.2917193,
+        0
+      ],
+      "rotation": [
+        0,
+        159.76077,
+        0
+      ],
+      "scale": [
+        60,
+        1,
+        60
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "PrimitiveName": "Ground",
+            "Tint": [
+              255,
+              255,
+              255,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0,
+            "Shininess": 32
+          }
+        },
+        {
+          "type": "Bobber",
+          "properties": {
+            "Enabled": true,
+            "Amplitude": 0.4,
+            "Speed": 2
+          }
+        },
+        {
+          "type": "CameraComponent",
+          "properties": {
+            "Enabled": true,
+            "FieldOfView": 60
+          }
+        },
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "Tint": [
+              255,
+              255,
+              255,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0.25,
+            "Shininess": 32
+          }
+        },
+        {
+          "type": "Spinner",
+          "properties": {
+            "Enabled": true,
+            "DegreesPerSecond": [
+              0,
+              45,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Scene Components",
+      "active": true,
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "components": [
+        {
+          "type": "ScenePortal",
+          "properties": {
+            "Enabled": true,
+            "TargetScene": "Scene2",
+            "Mode": "Load",
+            "Radius": 2.5,
+            "RequireInteract": true,
+            "InteractKey": "E",
+            "Prompt": "test",
+            "ShowDebug": true
+          }
+        }
+      ],
+      "scene": true
+    },
+    {
+      "name": "Cube",
+      "active": true,
+      "position": [
+        -13,
+        4,
+        -13
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "PrimitiveName": "Cube",
+            "Tint": [
+              200,
+              200,
+              205,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0.25,
+            "Shininess": 32
+          }
+        }
+      ]
+    }
+  ]
+}

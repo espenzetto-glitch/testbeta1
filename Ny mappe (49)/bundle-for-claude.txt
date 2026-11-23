@@ -1,0 +1,2711 @@
+using System.Reflection;
+using SharpEngine.Graphics3D.Editor;
+
+namespace SharpEngine.Graphics3D;
+
+/// <summary>
+/// Code that belongs to the whole world instead of one object or scene. One instance of every WorldScript class is created when
+/// the game starts playing and lives until it stops, across scene changes, merges and streaming. Write them in the World Map's
+/// code editor ("World Code"). The editor's completion list knows every scene, object and component of the project.
+/// </summary>
+public abstract class WorldScript
+{
+    /// <summary>The world (scene) the game is running in.</summary>
+    public World World { get; internal set; } = null!;
+
+    /// <summary>Turn the script off (it stops getting Update calls). Scripts that throw are switched off automatically.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Name of the scene that is open now.</summary>
+    public string CurrentScene => SceneManager.CurrentName;
+
+    /// <summary>Scenes merged into the open scene right now.</summary>
+    public IReadOnlyCollection<string> MergedScenes => World.Streamer.MergedScenes;
+
+    /// <summary>Runs once when play starts.</summary>
+    public virtual void Start() { }
+
+    /// <summary>Runs every frame while playing. <paramref name="dt"/> is seconds since the last frame.</summary>
+    public virtual void Update(float dt) { }
+
+    /// <summary>A scene was opened (also once when play starts, for the first scene).</summary>
+    public virtual void OnSceneLoaded(string scene) { }
+
+    /// <summary>Scenes were merged into, or split from, the open scene. <paramref name="merged"/> lists what is merged now.</summary>
+    public virtual void OnMergeChanged(IReadOnlyCollection<string> merged) { }
+
+    /// <summary>Play stops.</summary>
+    public virtual void OnStop() { }
+
+    // ---- shortcuts -------------------------------------------------------------------------------
+
+    /// <summary>An object of the open scene (or of a streamed or merged scene) by name.</summary>
+    protected GameObject? Find(string name) => World.Find(name);
+
+    protected void LoadScene(string scene) => SceneManager.LoadScene(scene);
+    protected void Merge(params string[] scenesOrGroups) => SceneManager.Merge(scenesOrGroups);
+    protected void Unmerge() => SceneManager.Unmerge();
+
+    /// <summary>Everything the project contains: every scene, object and component, also of scenes that are not loaded.</summary>
+    protected static IReadOnlyList<SceneInfo> Scenes => WorldIndex.Scenes;
+}
+
+/// <summary>Finds the WorldScript classes of the program (built in and compiled from Scripts/).</summary>
+public static class WorldScriptRegistry
+{
+    private static List<Type>? _builtIn;
+
+    public static IReadOnlyList<Type> Types
+    {
+        get
+        {
+            _builtIn ??= Discover();
+            Scripting.ScriptManager.EnsureLoaded();
+            return _builtIn.Concat(Scripting.ScriptManager.WorldTypes).OrderBy(t => t.Name, StringComparer.Ordinal).ToList();
+        }
+    }
+
+    private static List<Type> Discover()
+    {
+        var found = new List<Type>();
+        var baseAssembly = typeof(WorldScript).Assembly;
+        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            if (asm.IsDynamic) continue;
+            if (System.Runtime.Loader.AssemblyLoadContext.GetLoadContext(asm) is { } alc && alc.Name == "SharpEngine.Scripts") continue;
+            if (asm != baseAssembly && !asm.GetReferencedAssemblies().Any(n => n.Name == baseAssembly.GetName().Name)) continue;
+            Type[] types;
+            try { types = asm.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { types = ex.Types.Where(t => t is not null).ToArray()!; }
+            found.AddRange(types.Where(t => t.IsPublic && !t.IsAbstract && typeof(WorldScript).IsAssignableFrom(t) && t.GetConstructor(Type.EmptyTypes) is not null));
+        }
+        return found;
+    }
+}
+
+/// <summary>Runs the world scripts of one world. Every call is guarded: a script that throws is reported and switched off.</summary>
+internal sealed class WorldScriptHost
+{
+    private readonly World _world;
+    private readonly List<WorldScript> _scripts = new();
+    private bool _started;
+
+    public WorldScriptHost(World world) => _world = world;
+
+    public int Count => _scripts.Count;
+    public IReadOnlyList<WorldScript> Scripts => _scripts;
+
+    private void Guard(WorldScript s, string what, Action action)
+    {
+        try { action(); }
+        catch (Exception ex) when (ErrorLog.IsRecoverable(ex))
+        {
+            s.Enabled = false;
+            ErrorLog.Report($"world script {s.GetType().Name}.{what}", ex);
+            Scripting.ScriptManager.ReportWorldScriptError(s, ex);
+        }
+    }
+
+    public void Update(float dt)
+    {
+        if (!_started)
+        {
+            _started = true;
+            foreach (var type in WorldScriptRegistry.Types)
+            {
+                try
+                {
+                    var s = (WorldScript)Activator.CreateInstance(type)!;
+                    s.World = _world;
+                    _scripts.Add(s);
+                }
+                catch (Exception ex) when (ErrorLog.IsRecoverable(ex)) { ErrorLog.Report("creating world script " + type.Name, ex); }
+            }
+            foreach (var s in _scripts.ToList()) Guard(s, "Start", s.Start);
+            foreach (var s in _scripts.ToList()) if (s.Enabled) Guard(s, "OnSceneLoaded", () => s.OnSceneLoaded(SceneManager.CurrentName));
+        }
+        foreach (var s in _scripts.ToList())
+            if (s.Enabled) Guard(s, "Update", () => s.Update(dt));
+    }
+
+    public void SceneLoaded(string scene)
+    {
+        if (!_started) return;   // the first scene is announced together with Start
+        foreach (var s in _scripts.ToList()) if (s.Enabled) Guard(s, "OnSceneLoaded", () => s.OnSceneLoaded(scene));
+    }
+
+    public void MergeChanged(IReadOnlyCollection<string> merged)
+    {
+        if (!_started) return;
+        var copy = merged.ToList();
+        foreach (var s in _scripts.ToList()) if (s.Enabled) Guard(s, "OnMergeChanged", () => s.OnMergeChanged(copy));
+    }
+
+    public void Stop()
+    {
+        foreach (var s in _scripts.ToList()) Guard(s, "OnStop", s.OnStop);
+        _scripts.Clear();
+    }
+}
+using System.Reflection;
+using System.Runtime.Loader;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using SharpEngine.Graphics3D.Editor;
+
+namespace SharpEngine.Graphics3D.Scripting;
+
+/// <summary>One compiler message (error or warning) of a script.</summary>
+public sealed record ScriptDiagnostic(string File, int Line, int Column, string Id, string Message, bool IsError)
+{
+    public override string ToString() => $"{File}({Line},{Column}): {(IsError ? "error" : "warning")} {Id}: {Message}";
+}
+
+/// <summary>The outcome of compiling the Scripts folder. Nothing changes in the running program until <see cref="ScriptManager.Apply"/>.</summary>
+public sealed class ScriptBuild
+{
+    public bool Success { get; internal set; }
+    public List<ScriptDiagnostic> Diagnostics { get; } = new();
+    public IReadOnlyList<string> TypeNames { get; internal set; } = Array.Empty<string>();
+    public IReadOnlyList<string> WorldTypeNames { get; internal set; } = Array.Empty<string>();
+    public double Milliseconds { get; internal set; }
+    public int Files { get; internal set; }
+    internal byte[]? Image;
+
+    public IEnumerable<ScriptDiagnostic> Errors => Diagnostics.Where(d => d.IsError);
+}
+
+/// <summary>
+/// C# scripts: every .cs file in the project's Scripts folder is compiled (with Roslyn) into one in-memory assembly,
+/// and each public class that derives from <see cref="Component"/> becomes a component you can add to an object or pin to a scene.
+/// Public properties of type float, int, bool, string, Vector3 and Color show up in the Inspector and are saved with the scene.
+/// The player compiles the same files when the game starts (the build copies the Scripts folder next to the program).
+/// </summary>
+public static class ScriptManager
+{
+    public const string FolderName = "Scripts";
+
+    // names usable in every script without a using line
+    private const string GlobalUsings = """
+        global using System;
+        global using System.Collections.Generic;
+        global using System.Linq;
+        global using System.Numerics;
+        global using SharpEngine.Graphics3D;
+        global using SharpEngine.Graphics3D.Editor;
+        global using Color = Raylib_cs.Color;
+        global using KeyboardKey = Raylib_cs.KeyboardKey;
+        global using MouseButton = Raylib_cs.MouseButton;
+        global using Rl = Raylib_cs.Raylib;
+        """;
+
+    internal const string UnionPolyfill = """
+        #nullable enable
+        namespace System.Runtime.CompilerServices
+        {
+            [AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct, AllowMultiple = false)]
+            internal sealed class UnionAttribute : Attribute { }
+
+            internal interface IUnion { object? Value { get; } }
+        }
+        """;
+
+    private sealed class ScriptContext : AssemblyLoadContext
+    {
+        public ScriptContext() : base("SharpEngine.Scripts", isCollectible: true) { }
+    }
+
+    /// <summary>Compile scripts with C# preview features (default). Set false to stay on the latest released C# version.</summary>
+    public static bool PreviewLanguage { get; set; } = true;
+
+    private static ScriptContext? _context;
+    private static List<Type> _types = new();
+    private static List<Type> _worldTypes = new();
+    private static List<Type> _editorTypes = new();
+    private static List<MetadataReference>? _references;
+    private static bool _loaded;
+    private static int _counter;
+    private static DateTime _builtStamp;
+    private static readonly HashSet<Component> Reported = new();
+
+    public static string Directory => Path.Combine(GameProject.Root, FolderName);
+
+    /// <summary>The component classes found in the compiled scripts.</summary>
+    public static IReadOnlyList<Type> Types
+    {
+        get { EnsureLoaded(); return _types; }
+    }
+
+    /// <summary>The <see cref="WorldScript"/> classes found in the compiled scripts.</summary>
+    public static IReadOnlyList<Type> WorldTypes
+    {
+        get { EnsureLoaded(); return _worldTypes; }
+    }
+
+    /// <summary>The <see cref="Editor.EditorScript"/> classes found in the compiled scripts.</summary>
+    public static IReadOnlyList<Type> EditorTypes
+    {
+        get { EnsureLoaded(); return _editorTypes; }
+    }
+
+    /// <summary>The last compile (startup or the editor), for the code window.</summary>
+    public static ScriptBuild? Last { get; private set; }
+
+    /// <summary>Most recent exception thrown by a script while the game ran, shown in the editor.</summary>
+    public static string? RuntimeError { get; private set; }
+
+    /// <summary>Raised after new scripts replaced the old ones.</summary>
+    public static event Action? Applied;
+
+    public static bool IsScript(Type t) => t.Assembly.IsDynamic == false && AssemblyLoadContext.GetLoadContext(t.Assembly) is ScriptContext;
+
+    public static bool IsScript(object o) => IsScript(o.GetType());
+
+    // ---- files ------------------------------------------------------------------------------
+
+    public static IReadOnlyList<string> Files()
+    {
+        if (!System.IO.Directory.Exists(Directory)) return Array.Empty<string>();
+        return System.IO.Directory.GetFiles(Directory, "*.cs", SearchOption.AllDirectories)
+            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    /// <summary>"Spin2" is fine, "2spin" and "my script" are not. Returns null when nothing usable is left.</summary>
+    public static string? SanitizeName(string name)
+    {
+        var chars = name.Where(c => char.IsLetterOrDigit(c) || c == '_').ToArray();
+        var clean = new string(chars);
+        if (clean.Length == 0) return null;
+        if (char.IsDigit(clean[0])) clean = "_" + clean;
+        return clean;
+    }
+
+    public static string TemplateFor(string className) => $$"""
+        // A component. Add it to any object, or pin it to a scene, from the Inspector.
+        // Public properties of type float, int, bool, string, Vector3 and Color show up in the Inspector.
+        public class {{className}} : Component
+        {
+            public float Speed { get; set; } = 1f;
+
+            public override void Start()
+            {
+            }
+
+            public override void Update(float dt)
+            {
+                // Transform is the object's position, rotation and scale; World is the scene.
+                Transform.Rotate(new Vector3(0f, 45f * Speed * dt, 0f));
+            }
+        }
+        """;
+
+    public static string WorldTemplateFor(string className) => $$"""
+        // World code: runs for the whole game while it plays, across scene changes, merges and streaming.
+        // Press Ctrl+Space (or type a dot) for suggestions. The Objects panel on the right lists every scene, object and component.
+        public class {{className}} : WorldScript
+        {
+            public override void Start()
+            {
+            }
+
+            // A scene was opened (also once for the first scene when play starts).
+            public override void OnSceneLoaded(string scene)
+            {
+            }
+
+            // Scenes were merged into, or split from, the open scene.
+            public override void OnMergeChanged(IReadOnlyCollection<string> merged)
+            {
+            }
+
+            public override void Update(float dt)
+            {
+            }
+        }
+        """;
+
+    public const string WorldFolderName = "World";
+    public const string EditorFolderName = "Editor";
+
+    public static string EditorTemplateFor(string className) => $$"""
+        // Editor tool: adds buttons, menu commands, panels and shortcuts to the admin editor. Compile with Ctrl+S, no restart needed.
+        // Everything registered here disappears and is registered again every time the scripts are recompiled.
+        public class {{className}} : EditorScript
+        {
+            private int _count = 5;
+
+            public override void OnRegister(EditorApi editor)
+            {
+                // Tools menu entry (toolbar > Tools)
+                editor.AddCommand("Say hello", world => editor.Say("Hello from " + CurrentScene));
+
+                // a button in the toolbar
+                editor.AddToolbarButton("Add Cube", world =>
+                {
+                    var go = world.CreatePrimitive("Cube", Color.White, new Vector3(0, 1, 0));
+                    editor.Select(go);
+                });
+
+                // a section at the bottom of the Inspector, drawn every frame
+                editor.AddPanel("My tool", ui =>
+                {
+                    ui.Slider("Count", ref _count, 1, 50);
+                    if (ui.Button($"Spawn {_count} cubes"))
+                        for (int i = 0; i < _count; i++)
+                            editor.World.CreatePrimitive("Cube", Color.White, new Vector3(i * 2f, 1, 0));
+                });
+
+                // a section for selected objects that have a MeshRenderer
+                editor.AddObjectInspector<MeshRenderer>("Mesh tools", (ui, go) =>
+                {
+                    ui.Dim(go.Name);
+                    if (ui.Button("Reset scale")) go.Transform.Scale = Vector3.One;
+                });
+
+                // Ctrl+F9
+                editor.AddShortcut(KeyboardKey.F9, world => editor.Say("Shortcut pressed"), ctrl: true);
+            }
+
+            public override void OnSelectionChanged(GameObject? selected)
+            {
+            }
+        }
+        """;
+
+    public static string CreateEditorScript(string name)
+    {
+        var clean = SanitizeName(name) ?? throw new ArgumentException("Use letters, digits and underscores.", nameof(name));
+        ProtectProject();
+        string folder = Path.Combine(Directory, EditorFolderName);
+        System.IO.Directory.CreateDirectory(folder);
+        var path = Path.Combine(folder, clean + ".cs");
+        if (File.Exists(path)) throw new IOException($"{clean}.cs already exists.");
+        File.WriteAllText(path, EditorTemplateFor(clean).Replace("\r\n", "\n"));
+        return path;
+    }
+
+    /// <summary>Scripts/World/WorldCode.cs, the file the World Map's "World Code" button opens (created on first use).</summary>
+    public static string WorldCodePath => Path.Combine(Directory, WorldFolderName, "WorldCode.cs");
+
+    /// <summary>
+    /// dotnet compiles every .cs file next to a .csproj, so Scripts/*.cs would end up inside the game itself (and fail:
+    /// the scripts rely on the editor's implicit usings). Makes sure the game's project file leaves the folder out.
+    /// Returns true when the project file was changed.
+    /// </summary>
+    public static bool ProtectProject(string? csprojPath = null)
+    {
+        try
+        {
+            if ((csprojPath ?? GameProject.CsprojPath) is not { } csproj) return false;
+            var doc = System.Xml.Linq.XDocument.Load(csproj, System.Xml.Linq.LoadOptions.PreserveWhitespace);
+            var root = doc.Root;
+            if (root is null) return false;
+            bool has = root.Descendants().Any(e => e.Name.LocalName == "Compile" && ((string?)e.Attribute("Remove") ?? "").Replace('\\', '/').StartsWith("Scripts/", StringComparison.OrdinalIgnoreCase));
+            if (has) return false;
+            var group = new System.Xml.Linq.XElement("ItemGroup",
+                new System.Xml.Linq.XComment(" Scripts/*.cs are compiled by the in-game code editor, not by dotnet build "),
+                new System.Xml.Linq.XElement("Compile", new System.Xml.Linq.XAttribute("Remove", "Scripts/**")),
+                new System.Xml.Linq.XElement("None", new System.Xml.Linq.XAttribute("Remove", "Scripts/**")));
+            root.Add(new System.Xml.Linq.XText("\n  "), group, new System.Xml.Linq.XText("\n"));
+            doc.Save(csproj);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Xml.XmlException)
+        {
+            ErrorLog.Report("updating the project file", ex);
+            return false;
+        }
+    }
+
+    /// <summary>Creates Scripts/Name.cs with a starter component. Returns the file path.</summary>
+    public static string CreateScript(string name, bool world = false, string? content = null)
+    {
+        var clean = SanitizeName(name) ?? throw new ArgumentException("Use letters, digits and underscores.", nameof(name));
+        ProtectProject();
+        string folder = world ? Path.Combine(Directory, WorldFolderName) : Directory;
+        System.IO.Directory.CreateDirectory(folder);
+        var path = Path.Combine(folder, clean + ".cs");
+        if (File.Exists(path)) throw new IOException($"{clean}.cs already exists.");
+        File.WriteAllText(path, (content ?? (world ? WorldTemplateFor(clean) : TemplateFor(clean))).Replace("\r\n", "\n"));
+        return path;
+    }
+
+    /// <summary>Creates Scripts/Name.cs holding a MeshGenerator: the code of <paramref name="mesh"/> when given, otherwise a starter example.</summary>
+    public static string CreateMeshScript(string name, MeshData? mesh = null, string? objectName = null)
+    {
+        var clean = SanitizeName(name) ?? throw new ArgumentException("Use letters, digits and underscores.", nameof(name));
+        return CreateScript(clean, content: mesh is null && objectName is null ? MeshCode.Template(clean) : MeshCode.FromMesh(mesh, clean, objectName ?? clean));
+    }
+
+    /// <summary>The script file that declares <c>class className</c>, or null.</summary>
+    public static string? FindScriptFile(string className)
+    {
+        var rx = new System.Text.RegularExpressions.Regex(@"\bclass\s+" + System.Text.RegularExpressions.Regex.Escape(className) + @"\b");
+        foreach (var f in Files())
+        {
+            try { if (rx.IsMatch(File.ReadAllText(f))) return f; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+        return null;
+    }
+
+    /// <summary>The world code file, created with the starter template when it does not exist yet.</summary>
+    public static string EnsureWorldCode()
+    {
+        if (!File.Exists(WorldCodePath)) CreateScript("WorldCode", world: true);
+        return WorldCodePath;
+    }
+
+    // ---- compiling --------------------------------------------------------------------------
+
+    private static List<MetadataReference> References()
+    {
+        if (_references is not null) return _references;
+        var list = new List<MetadataReference>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var tpa = (AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") as string ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
+        foreach (var path in tpa)
+        {
+            var name = Path.GetFileName(path);
+            if (!seen.Add(name)) continue;
+            try { list.Add(MetadataReference.CreateFromFile(path)); }
+            catch (Exception ex) when (ex is IOException or BadImageFormatException or UnauthorizedAccessException) { }
+        }
+        // assemblies loaded from somewhere else (tests, plugins) that the scripts may need
+        foreach (var asm in new[] { typeof(Component).Assembly, typeof(Raylib_cs.Color).Assembly })
+            if (!asm.IsDynamic && asm.Location.Length > 0 && seen.Add(Path.GetFileName(asm.Location)))
+                list.Add(MetadataReference.CreateFromFile(asm.Location));
+        return _references = list;
+    }
+
+    /// <summary>Compiles every script in the Scripts folder. Does not change anything that is running; call <see cref="Apply"/> to use it.</summary>
+    public static ScriptBuild Build()
+    {
+        try { return BuildCore(); }
+        catch (Exception ex) when (ErrorLog.IsRecoverable(ex))
+        {
+            // the compiler itself failed (for example a missing file): report it as a normal compile error
+            ErrorLog.Report("script compiler", ex);
+            var failed = new ScriptBuild();
+            failed.Diagnostics.Add(new ScriptDiagnostic("(compiler)", 1, 1, "INTERNAL", ErrorLog.Unwrap(ex).GetType().Name + ": " + ErrorLog.Unwrap(ex).Message, true));
+            return Finish(failed, System.Diagnostics.Stopwatch.StartNew());
+        }
+    }
+
+    private static ScriptBuild BuildCore()
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var build = new ScriptBuild();
+        var files = Files();
+        build.Files = files.Count;
+        if (files.Count == 0)
+        {
+            build.Success = true;
+            build.Image = null;
+            build.Milliseconds = watch.Elapsed.TotalMilliseconds;
+            return build;
+        }
+
+        // Preview = every C# feature the compiler has, including the unfinished next version (C# 15 preview with a new enough Roslyn)
+        var parse = new CSharpParseOptions(PreviewLanguage ? LanguageVersion.Preview : LanguageVersion.Latest);
+        var trees = new List<SyntaxTree> { CSharpSyntaxTree.ParseText(GlobalUsings, parse, "GlobalUsings.cs") };
+        // C# 15 `union` needs two runtime types; older runtimes lack them, so scripts get their own copy (as Microsoft's blog describes)
+        if (Type.GetType("System.Runtime.CompilerServices.UnionAttribute") is null)
+            trees.Add(CSharpSyntaxTree.ParseText(UnionPolyfill, parse, "UnionPolyfill.cs"));
+        foreach (var f in files)
+        {
+            string text;
+            try { text = File.ReadAllText(f); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                build.Diagnostics.Add(new ScriptDiagnostic(Path.GetFileName(f), 1, 1, "IO", ex.Message, true));
+                continue;
+            }
+            trees.Add(CSharpSyntaxTree.ParseText(text, parse, f));
+        }
+        if (build.Errors.Any()) return Finish(build, watch);
+
+        var options = new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary,
+            optimizationLevel: OptimizationLevel.Debug, nullableContextOptions: NullableContextOptions.Disable, allowUnsafe: true);
+        var compilation = CSharpCompilation.Create("GameScripts_" + (++_counter), trees, References(), options);
+
+        using var ms = new MemoryStream();
+        var emit = compilation.Emit(ms);
+        foreach (var d in emit.Diagnostics)
+        {
+            if (d.Severity < DiagnosticSeverity.Warning || d.Location.SourceTree?.FilePath == "GlobalUsings.cs") continue;
+            var pos = d.Location.GetLineSpan().StartLinePosition;
+            var file = d.Location.SourceTree?.FilePath is { Length: > 0 } fp ? Path.GetFileName(fp) : "";
+            build.Diagnostics.Add(new ScriptDiagnostic(file, pos.Line + 1, pos.Character + 1, d.Id, d.GetMessage(), d.Severity == DiagnosticSeverity.Error));
+        }
+
+        if (!emit.Success || build.Errors.Any()) return Finish(build, watch);
+
+        build.Image = ms.ToArray();
+        // find the component classes by loading the image into a throw-away context
+        var probe = new ScriptContext();
+        try
+        {
+            var asm = probe.LoadFromStream(new MemoryStream(build.Image));
+            build.TypeNames = ComponentTypes(asm).Select(t => t.Name).OrderBy(n => n, StringComparer.Ordinal).ToList();
+            build.WorldTypeNames = WorldScriptTypes(asm).Select(t => t.Name).OrderBy(n => n, StringComparer.Ordinal).ToList();
+            build.Success = true;
+        }
+        finally { probe.Unload(); }
+        return Finish(build, watch);
+    }
+
+    private static ScriptBuild Finish(ScriptBuild build, System.Diagnostics.Stopwatch watch)
+    {
+        build.Milliseconds = watch.Elapsed.TotalMilliseconds;
+        Last = build;
+        LogBuild(build);
+        return build;
+    }
+
+    private static IEnumerable<Type> ComponentTypes(Assembly asm)
+    {
+        Type[] types;
+        try { types = asm.GetTypes(); }
+        catch (ReflectionTypeLoadException ex) { types = ex.Types.Where(t => t is not null).ToArray()!; }
+        return types.Where(t => t.IsPublic && !t.IsAbstract && typeof(Component).IsAssignableFrom(t) && t.GetConstructor(Type.EmptyTypes) is not null);
+    }
+
+    private static IEnumerable<Type> WorldScriptTypes(Assembly asm)
+    {
+        Type[] types;
+        try { types = asm.GetTypes(); }
+        catch (ReflectionTypeLoadException ex) { types = ex.Types.Where(t => t is not null).ToArray()!; }
+        return types.Where(t => t.IsPublic && !t.IsAbstract && typeof(WorldScript).IsAssignableFrom(t) && t.GetConstructor(Type.EmptyTypes) is not null);
+    }
+
+    private static IEnumerable<Type> EditorScriptTypes(Assembly asm)
+    {
+        Type[] types;
+        try { types = asm.GetTypes(); }
+        catch (ReflectionTypeLoadException ex) { types = ex.Types.Where(t => t is not null).ToArray()!; }
+        return types.Where(t => t.IsPublic && !t.IsAbstract && typeof(Editor.EditorScript).IsAssignableFrom(t) && t.GetConstructor(Type.EmptyTypes) is not null);
+    }
+
+    /// <summary>
+    /// Names of components in <paramref name="used"/> that come from scripts but are missing from the new build
+    /// (they would be lost if the new scripts were applied).
+    /// </summary>
+    public static IReadOnlyList<string> MissingFrom(ScriptBuild build, IEnumerable<string> used) =>
+        used.Where(n => _types.Any(t => t.Name == n) && !build.TypeNames.Contains(n)).Distinct().ToList();
+
+    /// <summary>Makes a successful build the running scripts. Components made from the old scripts must be recreated afterwards (the editor reloads the scene).</summary>
+    public static void Apply(ScriptBuild build)
+    {
+        if (!build.Success) throw new InvalidOperationException("Cannot apply scripts that did not compile.");
+        var old = _context;
+        var oldTypes = _types;
+        _context = null;
+        _types = new List<Type>();
+        _worldTypes = new List<Type>();
+        _editorTypes = new List<Type>();
+        if (build.Image is not null)
+        {
+            _context = new ScriptContext();
+            var asm = _context.LoadFromStream(new MemoryStream(build.Image));
+            _types = ComponentTypes(asm).OrderBy(t => t.Name, StringComparer.Ordinal).ToList();
+            _worldTypes = WorldScriptTypes(asm).OrderBy(t => t.Name, StringComparer.Ordinal).ToList();
+            _editorTypes = EditorScriptTypes(asm).OrderBy(t => t.Name, StringComparer.Ordinal).ToList();
+        }
+        ComponentRegistry.ScriptsChanged(oldTypes);
+        old?.Unload();
+        _builtStamp = LatestWrite();
+        _loaded = true;
+        RuntimeError = null;
+        Reported.Clear();
+        Applied?.Invoke();
+    }
+
+    /// <summary>Compiles and applies the scripts the first time anything needs the component list (game start).</summary>
+    public static void EnsureLoaded()
+    {
+        if (_loaded) return;
+        _loaded = true;   // set first: compiling asks the registry, which asks us
+        try
+        {
+            if (Files().Count == 0) return;
+            var build = Build();
+            if (build.Success) Apply(build);
+            else foreach (var e in build.Errors) Console.Error.WriteLine("[script] " + e);
+        }
+        catch (Exception ex) when (ErrorLog.IsRecoverable(ex))
+        {
+            ErrorLog.Report("loading scripts", ex);
+        }
+        _builtStamp = LatestWrite();
+    }
+
+    private static DateTime LatestWrite() =>
+        Files().Select(f => File.GetLastWriteTimeUtc(f)).DefaultIfEmpty(DateTime.MinValue).Max();
+
+    /// <summary>True when a script file changed since the scripts were last compiled.</summary>
+    public static bool IsStale => _loaded && LatestWrite() != _builtStamp;
+
+    /// <summary>Forget everything (tests, a different project folder).</summary>
+    public static void Reset()
+    {
+        var old = _context; var oldTypes = _types;
+        _context = null; _types = new List<Type>(); _worldTypes = new List<Type>(); _loaded = false; Last = null; RuntimeError = null; Reported.Clear();
+        ComponentRegistry.ScriptsChanged(oldTypes);
+        old?.Unload();
+    }
+
+    public static void ReportRuntimeError(Component c, Exception ex)
+    {
+        var inner = ex is TargetInvocationException { InnerException: { } i } ? i : ex;
+        RuntimeError = $"{c.GetType().Name} on '{c.GameObject?.Name}': {inner.GetType().Name}: {inner.Message}";
+        if (Reported.Add(c)) ErrorLog.Report("script " + c.GetType().Name, inner);
+    }
+
+    public static void ReportWorldScriptError(WorldScript s, Exception ex)
+    {
+        var inner = ex is TargetInvocationException { InnerException: { } i } ? i : ex;
+        RuntimeError = $"World script {s.GetType().Name}: {inner.GetType().Name}: {inner.Message}";
+        DebugLog.Add(LogLevel.Error, "world script", RuntimeError, inner.StackTrace);
+    }
+
+    private static void LogBuild(ScriptBuild b)
+    {
+        foreach (var d in b.Diagnostics.OrderByDescending(x => x.IsError))
+            DebugLog.Add(d.IsError ? LogLevel.Error : LogLevel.Warning, "compiler", $"{d.File}({d.Line},{d.Column})  {d.Id}: {d.Message}");
+        if (b.Success)
+            DebugLog.Add(LogLevel.Info, "compiler", $"Compiled {b.Files} file(s) in {b.Milliseconds:0} ms: {(b.TypeNames.Count > 0 ? string.Join(", ", b.TypeNames) : "no components")}");
+        else
+            DebugLog.Add(LogLevel.Error, "compiler", $"Compile failed: {b.Errors.Count()} error(s). The old scripts keep running.");
+    }
+
+    public static void ClearRuntimeError() => RuntimeError = null;
+}
+using Raylib_cs;
+using SharpEngine.Graphics3D.Editor;
+
+namespace SharpEngine.Graphics3D;
+
+/// <summary>
+/// Scenes are JSON files in the game's Scenes folder. The Build Settings list decides which ones
+/// ship in the player and in what order (build index 0 is the first scene). Game code and
+/// <see cref="ScenePortal"/> call <see cref="LoadScene(string)"/> to move the player between scenes.
+/// </summary>
+public static class SceneManager
+{
+    private static BuildConfig? _config;
+    private static string? _pending;
+    private static bool _loaded;
+
+    /// <summary>Raised after a scene was loaded into the world.</summary>
+    public static event Action<string>? SceneLoaded;
+
+    public static BuildConfig Config => _config ??= LoadConfig();
+
+    /// <summary>Name of the scene currently in the world (no folder, no extension).</summary>
+    public static string CurrentName { get; set; } = "Untitled";
+
+    public static string ScenesDirectory => GameProject.ScenesDirectory;
+
+    // ---- config ------------------------------------------------------------------------------
+
+    private static BuildConfig LoadConfig()
+    {
+        try
+        {
+            if (File.Exists(GameProject.ConfigPath))
+                return BuildConfig.FromJson(File.ReadAllText(GameProject.ConfigPath));
+        }
+        catch (Exception ex) when (ex is IOException or System.Text.Json.JsonException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"[build] could not read {GameProject.ConfigPath}: {ex.Message}");
+        }
+        return new BuildConfig();
+    }
+
+    public static void SaveConfig() => File.WriteAllText(GameProject.ConfigPath, Config.ToJson());
+
+    /// <summary>Forget the cached config (tests).</summary>
+    public static void Reset()
+    {
+        _config = null;
+        _pending = null;
+        _worldActions.Clear();
+        _loaded = false;
+        CurrentName = "Untitled";
+        WorldLayout.Reset();
+    }
+
+    // ---- files -------------------------------------------------------------------------------
+
+    /// <summary>"Scenes/Main", "Main.json" and "Main" all become "Main".</summary>
+    public static string NameOf(string pathOrName)
+    {
+        var n = Path.GetFileNameWithoutExtension(pathOrName.Replace('\\', '/').TrimEnd('/'));
+        return n;
+    }
+
+    public static string FileFor(string pathOrName) => Path.Combine(ScenesDirectory, NameOf(pathOrName) + ".json");
+
+    public static string BuildPathFor(string name) => "Scenes/" + NameOf(name);
+
+    public static bool Exists(string pathOrName) => File.Exists(FileFor(pathOrName));
+
+    public static IReadOnlyList<string> AvailableScenes()
+    {
+        if (!Directory.Exists(ScenesDirectory)) return Array.Empty<string>();
+        return Directory.GetFiles(ScenesDirectory, "*.json")
+            .Select(Path.GetFileNameWithoutExtension)
+            .Where(n => !string.IsNullOrEmpty(n))
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToList()!;
+    }
+
+    /// <summary>Where deleted scene files are kept so a mistake can be undone.</summary>
+    public static string DeletedDirectory => Path.Combine(GameProject.Root, "Backups", "DeletedScenes");
+
+    /// <summary>
+    /// Deletes a scene: the file moves to <see cref="DeletedDirectory"/> (copy it back to Scenes/ to undo), and the scene is taken out of the
+    /// build list, the world map and its merge group. The scene that is open now cannot be deleted. Returns false (with a reason) when it was not deleted.
+    /// </summary>
+    public static bool Delete(string pathOrName, out string reason)
+    {
+        string name = NameOf(pathOrName);
+        reason = "";
+        if (string.Equals(name, CurrentName, StringComparison.OrdinalIgnoreCase)) { reason = $"'{name}' is open. Open another scene first."; return false; }
+        string file = FileFor(name);
+        if (!File.Exists(file)) { reason = $"'{name}' has no file."; return false; }
+        try
+        {
+            Directory.CreateDirectory(DeletedDirectory);
+            string target = Path.Combine(DeletedDirectory, $"{name}-{DateTime.Now:yyyyMMdd-HHmmss}.json");
+            File.Move(file, target, overwrite: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            reason = $"Could not delete '{name}': {ex.Message}";
+            return false;
+        }
+        if (Config.Scenes.RemoveAll(s => string.Equals(NameOf(s.Path), name, StringComparison.OrdinalIgnoreCase)) > 0)
+        {
+            try { SaveConfig(); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+        WorldLayout.Remove(name);
+        return true;
+    }
+
+    /// <summary>Deletes several scenes. Returns how many were deleted; <paramref name="problems"/> lists the ones that were not.</summary>
+    public static int DeleteMany(IEnumerable<string> names, out List<string> problems)
+    {
+        problems = new List<string>();
+        int done = 0;
+        foreach (var n in names.ToList())
+            if (Delete(n, out var why)) done++; else problems.Add(why);
+        return done;
+    }
+
+    /// <summary>Letters, digits, space, '-' and '_' only. Returns null if nothing usable is left.</summary>
+    public static string? SanitizeName(string name)
+    {
+        var clean = new string(name.Where(c => char.IsLetterOrDigit(c) || c is ' ' or '-' or '_').ToArray()).Trim();
+        return clean.Length == 0 ? null : clean;
+    }
+
+    public static string UniqueName(string baseName)
+    {
+        if (!Exists(baseName)) return baseName;
+        for (int i = 1; ; i++)
+            if (!Exists(baseName + i)) return baseName + i;
+    }
+
+    public static void Save(World world, string? name = null)
+    {
+        name = NameOf(name ?? CurrentName);
+        Directory.CreateDirectory(ScenesDirectory);
+        File.WriteAllText(FileFor(name), SceneSerializer.Save(world));
+        CurrentName = name;
+        WorldLayout.Ensure(name);
+    }
+
+    /// <summary>Loads a scene file into the world right now (use <see cref="LoadScene(string)"/> from game code).</summary>
+    public static void Open(World world, string pathOrName)
+    {
+        var name = NameOf(pathOrName);
+        var file = FileFor(name);
+        if (!File.Exists(file)) throw new FileNotFoundException($"Scene '{name}' not found.", file);
+        SceneSerializer.Load(world, File.ReadAllText(file));
+        ScenePortal.ResetPrompt();
+        CurrentName = name;
+        _loaded = true;
+        if (!world.PlayMode) world.EditorView.Initialised = false;   // a different scene: start the editor view at its camera
+        world.NotifySceneLoaded(name);
+        SceneLoaded?.Invoke(name);
+    }
+
+    /// <summary>A world with just a Main Camera, ready to start a new scene.</summary>
+    public static void CreateEmpty(World world, string name)
+    {
+        world.Clear();
+        var cam = world.Instantiate("Main Camera", new System.Numerics.Vector3(6f, 4f, 9f));
+        cam.Transform.LookAt(new System.Numerics.Vector3(0f, 1f, 0f));
+        cam.AddComponent<CameraComponent>();
+        cam.AddComponent<FlyCamera>();
+        world.Flush();
+        CurrentName = name;
+        _loaded = true;
+    }
+
+    /// <summary>Writes a new scene file (camera + ground) without touching the open scene. Returns its name.</summary>
+    public static string CreateSceneFile(string baseName = "NewScene")
+    {
+        var name = UniqueName(SanitizeName(baseName) ?? "NewScene");
+        var w = new World();
+        var (keepName, keepLoaded) = (CurrentName, _loaded);
+        try
+        {
+            CreateEmpty(w, name);
+            var ground = w.CreateMesh("Ground", Primitives.Ground(), Raylib_cs.Color.White);
+            ground.Transform.Scale = new System.Numerics.Vector3(w.SizeX, 1f, w.SizeZ);
+            ground.GetComponent<MeshRenderer>()!.Specular = 0f;
+            w.Flush();
+            Directory.CreateDirectory(ScenesDirectory);
+            File.WriteAllText(FileFor(name), Editor.SceneSerializer.Save(w));
+            WorldLayout.Ensure(name);
+        }
+        finally { (CurrentName, _loaded) = (keepName, keepLoaded); }
+        return name;
+    }
+
+    // ---- moving between scenes at runtime --------------------------------------------------------
+
+    /// <summary>Scenes that will be part of the build, in order (the index is the build index).</summary>
+    public static IReadOnlyList<string> BuildScenes => Config.EnabledScenes.Select(s => NameOf(s.Path)).ToList();
+
+    public static int CurrentBuildIndex
+    {
+        get
+        {
+            var list = BuildScenes;
+            for (int i = 0; i < list.Count; i++)
+                if (string.Equals(list[i], CurrentName, StringComparison.OrdinalIgnoreCase)) return i;
+            return -1;
+        }
+    }
+
+    /// <summary>Switches to a scene by name at the end of the current frame. Safe to call from components.</summary>
+    public static void LoadScene(string nameOrPath) => _pending = NameOf(nameOrPath);
+
+    // ---- merging scenes into a bigger one -----------------------------------------------------------
+
+    private static readonly Queue<Action<World>> _worldActions = new();
+
+    /// <summary>Scenes merged into the open one right now (empty when not merged).</summary>
+    public static IReadOnlyCollection<string> MergedScenes => _mergedView();
+    private static Func<IReadOnlyCollection<string>> _mergedView = () => Array.Empty<string>();
+
+    /// <summary>
+    /// Joins other scenes (or a merge group of the World Map, by name) to the open scene at the end of the frame: they are loaded at their
+    /// map positions and stay loaded, so the open scene and these become one bigger scene. Works while playing. Safe to call from components.
+    /// </summary>
+    public static void Merge(params string[] scenesOrGroups) => _worldActions.Enqueue(w => w.Streamer.Merge(scenesOrGroups));
+
+    /// <summary>Splits the merged scenes again (the bigger scene shrinks back to the open scene).</summary>
+    public static void Unmerge() => _worldActions.Enqueue(w => w.Streamer.Unmerge());
+
+    /// <summary>Merges when not merged, splits when merged.</summary>
+    public static void ToggleMerge(string sceneOrGroup) => _worldActions.Enqueue(w =>
+    {
+        var members = WorldLayout.ResolveMerge(sceneOrGroup);
+        if (members.Count > 0 && members.All(m => w.Streamer.IsMerged(m) || string.Equals(m, CurrentName, StringComparison.OrdinalIgnoreCase))) w.Streamer.Unmerge();
+        else w.Streamer.Merge(sceneOrGroup);
+    });
+
+    /// <summary>Switches to a scene by its Build Settings index.</summary>
+    public static void LoadScene(int buildIndex)
+    {
+        var list = BuildScenes;
+        if (buildIndex < 0 || buildIndex >= list.Count)
+            throw new ArgumentOutOfRangeException(nameof(buildIndex), $"Build index {buildIndex} is not in the build ({list.Count} scenes).");
+        _pending = list[buildIndex];
+    }
+
+    public static void LoadNext() => Step(+1);
+    public static void LoadPrevious() => Step(-1);
+
+    private static void Step(int delta)
+    {
+        var list = BuildScenes;
+        if (list.Count == 0) return;
+        int i = CurrentBuildIndex;
+        _pending = list[((i < 0 ? (delta > 0 ? -1 : 0) : i) + delta + list.Count) % list.Count];
+    }
+
+    /// <summary>Starts the player: loads build index 0.</summary>
+    public static bool LoadFirst(World world)
+    {
+        var list = BuildScenes;
+        if (list.Count == 0) return false;
+        Open(world, list[0]);
+        return true;
+    }
+
+    /// <summary>Applies a requested scene change. Call once per frame outside of component updates.</summary>
+    public static void Process(World world)
+    {
+        while (_worldActions.Count > 0)
+        {
+            var action = _worldActions.Dequeue();
+            try { action(world); }
+            catch (Exception ex) when (ErrorLog.IsRecoverable(ex)) { ErrorLog.Report("merging scenes", ex); }
+        }
+        _mergedView = () => world.Streamer.MergedScenes;
+        if (_pending is not { } name) return;
+        _pending = null;
+        _worldActions.Clear();   // merge requests made before a scene change belong to the old scene
+        try
+        {
+            Open(world, name);
+        }
+        catch (Exception ex) when (ex is IOException or System.Text.Json.JsonException)
+        {
+            Console.Error.WriteLine($"[scene] could not load '{name}': {ex.Message}");
+        }
+    }
+
+    /// <summary>Hotkeys for the player: Tab / Shift+Tab step through the build, 1-9 jump to a build index.</summary>
+    public static void HandleHotkeys()
+    {
+        if (!_loaded) return;
+        if (KeyEvents.WasPressed(Raylib_cs.KeyboardKey.Tab))
+        {
+            if (Platform.Input.IsKeyDown(Raylib_cs.KeyboardKey.LeftShift)) LoadPrevious(); else LoadNext();
+        }
+        for (int i = 0; i < 9; i++)
+            if (KeyEvents.WasPressed(Raylib_cs.KeyboardKey.One + i) && i < BuildScenes.Count)
+                LoadScene(i);
+    }
+}
+
+/// <summary>
+/// Doorway to another scene. The camera is the player. With <see cref="RequireInteract"/> (default) the player
+/// walks up to it and presses the interact key (E); without it the portal fires as soon as the camera is close.
+/// It ignores the first moments after a scene loads so you don't bounce straight back.
+/// </summary>
+public sealed class ScenePortal : Component
+{
+    /// <summary>Scene name or build path to load. For the merge modes: a scene or a merge group of the World Map.</summary>
+    public string TargetScene { get; set; } = "";
+
+    /// <summary>
+    /// What the portal does: "Load" (go to the scene), "Merge" (join the scene or group to this one so they become one bigger scene),
+    /// "Unmerge" (split everything again) or "Toggle" (merge, and the next use splits).
+    /// </summary>
+    public string Mode { get; set; } = "Load";
+
+    /// <summary>How close the camera must be, in world units.</summary>
+    public float Radius { get; set; } = 2.5f;
+
+    /// <summary>True: press the interact key while inside the radius. False: enter automatically.</summary>
+    public bool RequireInteract { get; set; } = true;
+
+    /// <summary>Key name from Raylib's KeyboardKey list ("E", "F", "Enter", "Space", ...).</summary>
+    public string InteractKey { get; set; } = "E";
+
+    /// <summary>Text shown on screen while in range. Empty = "Press E to enter &lt;scene&gt;".</summary>
+    public string Prompt { get; set; } = "";
+
+    /// <summary>Draw the debug rings and label in the editor.</summary>
+    public bool ShowDebug { get; set; } = true;
+
+    /// <summary>Distance to the camera measured on the last update (-1 = unknown). Used by the debug label.</summary>
+    public float LastDistance { get; private set; } = -1f;
+
+    /// <summary>True while the camera is inside the radius.</summary>
+    public bool InRange { get; private set; }
+
+    /// <summary>Prompt of the nearest portal that is in range and waiting for the key (drawn by <see cref="App3D"/>).</summary>
+    public static string? ActivePrompt { get; private set; }
+    private static float _promptDistance;
+
+    /// <summary>
+    /// The key of the prompt that was showing last frame. Other code (the fly camera) must not use it for its own
+    /// purpose while a portal is waiting for it, otherwise pressing E to enter a portal would also fly the camera up.
+    /// </summary>
+    public static KeyboardKey? ReservedKey { get; private set; }
+    private static KeyboardKey? _nextReserved;
+
+    public static void ResetPrompt()
+    {
+        ReservedKey = _nextReserved;
+        _nextReserved = null;
+        ActivePrompt = null;
+        _promptDistance = float.MaxValue;
+    }
+
+    public KeyboardKey Key => Enum.TryParse<KeyboardKey>(InteractKey.Trim(), ignoreCase: true, out var k) ? k : KeyboardKey.E;
+
+    private string Target => TargetScene.Length > 0 ? (WorldLayout.GroupNamed(TargetScene) is { } g ? g.Name : SceneManager.NameOf(TargetScene)) : "(no target)";
+
+    public string PromptText => Prompt.Length > 0 ? Prompt : Mode.Trim().ToLowerInvariant() switch
+    {
+        "merge" => $"Press {Key} to merge {Target}",
+        "unmerge" => $"Press {Key} to split the merged scenes",
+        "toggle" => $"Press {Key} to {(WorldLayout.ResolveMerge(TargetScene) is { Count: > 0 } m && m.All(World.Streamer.IsMerged) ? "split" : "merge")} {Target}",
+        _ => $"Press {Key} to enter {Target}"
+    };
+
+    private bool _wasInRange;
+
+    private void Activate()
+    {
+        switch (Mode.Trim().ToLowerInvariant())
+        {
+            case "merge": SceneManager.Merge(TargetScene); break;
+            case "unmerge": SceneManager.Unmerge(); break;
+            case "toggle": SceneManager.ToggleMerge(TargetScene); break;
+            default: SceneManager.LoadScene(TargetScene); break;
+        }
+    }
+
+    public override void Update(float dt)
+    {
+        InRange = false;
+        LastDistance = -1f;
+        if (!World.TryGetCamera(out var cam)) return;
+        LastDistance = System.Numerics.Vector3.Distance(cam.Position, Transform.Position);
+        InRange = LastDistance <= Radius;
+        // automatic portals wait a second after a scene loads so you do not bounce straight back;
+        // portals that need a key press only need a moment so a quick press right after arriving still works
+        float grace = RequireInteract ? 0.2f : 1.0f;
+        bool entered = InRange && !_wasInRange;
+        _wasInRange = InRange;
+        bool loads = !Mode.Trim().Equals("merge", StringComparison.OrdinalIgnoreCase) && !Mode.Trim().Equals("unmerge", StringComparison.OrdinalIgnoreCase)
+                     && !Mode.Trim().Equals("toggle", StringComparison.OrdinalIgnoreCase);
+        bool needsTarget = !Mode.Trim().Equals("unmerge", StringComparison.OrdinalIgnoreCase);
+        if ((needsTarget && TargetScene.Length == 0) || World.Time < grace || !InRange) return;
+        // a portal that leads to the scene you are already standing in does nothing (it would just reload it)
+        if (loads && string.Equals(SceneManager.NameOf(TargetScene), SceneManager.CurrentName, StringComparison.OrdinalIgnoreCase)) return;
+        // portals of streamed neighbour scenes never fire on their own while you walk past; they still work with the key
+        if (!RequireInteract && GameObject.Chunk is not null) return;
+
+        if (!RequireInteract)
+        {
+            if (loads) Activate();
+            else if (entered) Activate();   // merging happens once when you walk in, not every frame
+            return;
+        }
+
+        if (LastDistance < _promptDistance) { ActivePrompt = PromptText; _promptDistance = LastDistance; }
+        _nextReserved = Key;
+        if (InteractPressed(Key)) Activate();
+    }
+
+    /// <summary>Checks whether the interact key was pressed this frame (tests replace it).</summary>
+    public static Func<KeyboardKey, bool> InteractPressed { get; set; } = key =>
+        !Editor.Gui.WantsKeyboard && KeyEvents.WasPressed(key);   // works while flying too (E also nudges the camera up)
+}
+using System.Numerics;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Raylib_cs;
+using SharpEngine.Graphics3D.Editor;
+using Rl = Raylib_cs.Raylib;
+
+namespace SharpEngine.Graphics3D;
+
+/// <summary>
+/// Turns the World Map into one continuous world while playing.
+///
+/// The scene you opened is the anchor: it stays where it is. Every other scene is a chunk on the World Map grid,
+/// and while the player is near it the streamer loads that scene's objects into the same world, moved to the chunk's
+/// place on the grid (cell offset x cell size). Chunks that the player has left behind are unloaded again.
+///
+/// Rules:
+///  - Cell size is the biggest scene on the map (<see cref="WorldLayout.CellSize"/>), the same size the World Map draws.
+///  - Cells within <see cref="Radius"/> of the player's cell are loaded (1 = 3x3). A loaded chunk is only unloaded when it is
+///    more than Radius + 1 cells away, so walking back and forth over a border never makes a chunk flicker.
+///  - Scene files are read and parsed on a background thread; the objects are then created a few per frame so a load never stalls.
+///  - Cameras of neighbouring scenes are ignored, the player keeps the camera of the main scene.
+///  - While a chunk's neighbours are streamed the camera is kept inside the whole map instead of inside the main scene,
+///    and sky, sun colour, sun strength and ambient light blend smoothly to those of the chunk the player stands in.
+///  - Saving a scene never writes streamed objects into it: they belong to their own scene file.
+/// </summary>
+public sealed class WorldStreamer
+{
+    private sealed class LoadedChunk
+    {
+        public string Scene = "";
+        public int X, Y;
+        public Vector3 Offset;
+        public readonly List<GameObject> Objects = new();
+        public World Settings = new();
+        public bool Complete;
+    }
+
+    private sealed class PendingLoad
+    {
+        public string Scene = "";
+        public int X, Y;
+        public Task<JsonObject?>? Parse;
+        public JsonObject? Root;
+        public LoadedChunk? Chunk;
+        public int Next;
+        public JsonArray? Objects;
+    }
+
+    private readonly World _world;
+    private readonly List<LoadedChunk> _loaded = new();
+    private readonly List<PendingLoad> _pending = new();
+    private Chunk? _anchor;
+    private bool _initialised;
+    private float _cell = 60f;
+    private (int MinX, int MinY, int MaxX, int MaxY) _extent;
+    private World? _blendTarget;
+    private List<Chunk> _candidates = new();
+    private readonly HashSet<string> _merged = new(StringComparer.OrdinalIgnoreCase);
+    private bool _autoChecked;
+
+    public WorldStreamer(World world) => _world = world;
+
+    /// <summary>Turn streaming on or off (the Build Settings value is applied by <see cref="App3D"/>).</summary>
+    public bool Enabled { get => (_enabled || _merged.Count > 0) && !Failed; set => _enabled = value; }
+    private bool _enabled;
+
+    /// <summary>Set when streaming threw an error: it stays off until the next scene load or Play so one bad chunk cannot stop the game.</summary>
+    public bool Failed { get; set; }
+
+    /// <summary>Cells kept loaded around the player. 1 = 3x3 chunks, 2 = 5x5.</summary>
+    public int Radius { get => _radius; set => _radius = Math.Clamp(value, 0, 4); }
+    private int _radius = 1;
+
+    /// <summary>How far around the player chunks are streamed: <see cref="Radius"/>, or -1 (only merged scenes) when streaming is off.</summary>
+    private int Reach => _enabled ? _radius : -1;
+
+    // ---- merging scenes into a bigger one ----------------------------------------------------------
+
+    /// <summary>
+    /// Scenes that are merged into the open one right now. They are loaded wherever the player is and are never unloaded,
+    /// so together with the open scene they act as one bigger scene. Temporary: it ends with <see cref="Unmerge"/>,
+    /// when another scene is opened or when play stops.
+    /// </summary>
+    public IReadOnlyCollection<string> MergedScenes => _merged;
+
+    public bool IsMerged(string scene) => _merged.Contains(SceneManager.NameOf(scene));
+
+    /// <summary>Merges scenes (or a merge group by name) into the open scene. Returns how many scenes joined.</summary>
+    public int Merge(params string[] namesOrGroups)
+    {
+        int added = 0;
+        var anchor = _anchor?.Scene ?? SceneManager.CurrentName;
+        foreach (var name in namesOrGroups)
+            foreach (var scene in WorldLayout.ResolveMerge(name))
+            {
+                if (string.Equals(scene, anchor, StringComparison.OrdinalIgnoreCase) || !SceneManager.Exists(scene)) continue;
+                if (_merged.Add(scene)) added++;
+            }
+        if (added > 0) _world.NotifyMergeChanged(_merged);
+        return added;
+    }
+
+    /// <summary>Splits everything that was merged. Chunks that are too far away unload; with streaming off the camera returns to the open scene.</summary>
+    public void Unmerge()
+    {
+        if (_merged.Count == 0) return;
+        _merged.Clear();
+        _world.NotifyMergeChanged(_merged);
+    }
+
+    /// <summary>Total size in cells of the open scene plus the merged scenes (what the bigger scene covers).</summary>
+    public (int MinX, int MinY, int MaxX, int MaxY)? MergedExtent()
+    {
+        if (_anchor is null) return null;
+        var cells = _candidates.Where(c => IsMerged(c.Scene)).Select(c => (c.X, c.Y)).Append((_anchor.X, _anchor.Y)).ToList();
+        return (cells.Min(c => c.X), cells.Min(c => c.Y), cells.Max(c => c.X), cells.Max(c => c.Y));
+    }
+
+    private void AutoMerge()
+    {
+        if (WorldLayout.GroupOf(SceneManager.CurrentName) is { Auto: true } g) Merge(g.Name);
+    }
+
+    /// <summary>Parse scene files on a background thread (turn off for tests).</summary>
+    public bool Background { get; set; } = true;
+
+    /// <summary>How many objects of a loading chunk are created per frame.</summary>
+    public int ObjectsPerFrame { get; set; } = 80;
+
+    /// <summary>Seconds-to-1/e for the sky and light blend between chunks.</summary>
+    public float BlendSpeed { get; set; } = 2.5f;
+
+    /// <summary>True while the streamer controls the world (enabled, playing, and the open scene is on the map).</summary>
+    public bool Active => Enabled && _initialised && _anchor is not null;
+
+    public string? AnchorScene => _anchor?.Scene;
+
+    /// <summary>Scene the player is standing in, or null when not streaming.</summary>
+    public string? CurrentChunk { get; private set; }
+
+    public float CellSize => _cell;
+
+    public int PendingCount => _pending.Count;
+
+    public IEnumerable<string> LoadedScenes => _loaded.Where(c => c.Complete).Select(c => c.Scene);
+
+    /// <summary>World position of the middle of a map cell.</summary>
+    public Vector3 CellCenter(int x, int y) =>
+        _anchor is null ? Vector3.Zero : new Vector3((x - _anchor.X) * _cell, 0f, (y - _anchor.Y) * _cell);
+
+    /// <summary>Map cell that contains a world position.</summary>
+    public (int X, int Y) CellAt(Vector3 p) =>
+        _anchor is null ? (0, 0) : (_anchor.X + (int)MathF.Floor(p.X / _cell + 0.5f), _anchor.Y + (int)MathF.Floor(p.Z / _cell + 0.5f));
+
+    /// <summary>Drops all loaded chunks (called when the world is cleared or play stops).</summary>
+    public void Reset()
+    {
+        ResetChunks();
+        _merged.Clear();
+        _autoChecked = false;
+    }
+
+    private void ResetChunks()
+    {
+        foreach (var c in _loaded)
+            foreach (var o in c.Objects)
+                if (!o.Destroyed) _world.Destroy(o);
+        _loaded.Clear();
+        _pending.Clear();
+        _anchor = null;
+        _initialised = false;
+        CurrentChunk = null;
+        _blendTarget = null;
+    }
+
+    /// <summary>Starts streaming around the scene that is open now. Called automatically on the first update.</summary>
+    public void Begin()
+    {
+        ResetChunks();   // merges requested before the start stay
+        _initialised = true;
+        if (!Enabled) return;
+        var anchor = WorldLayout.Of(SceneManager.CurrentName);
+        if (anchor is null) return;
+        _anchor = new Chunk { Scene = anchor.Scene, X = anchor.X, Y = anchor.Y };
+        _candidates = Candidates();
+        _cell = MathF.Max(10f, _candidates.Max(c =>
+        {
+            // the open scene may have an unsaved size, so ask the world instead of its file
+            var (x, z) = string.Equals(c.Scene, anchor.Scene, StringComparison.OrdinalIgnoreCase) ? (_world.SizeX, _world.SizeZ) : WorldLayout.SizeOf(c.Scene);
+            return MathF.Max(x, z);
+        }));
+        _extent = (_candidates.Min(c => c.X), _candidates.Min(c => c.Y), _candidates.Max(c => c.X), _candidates.Max(c => c.Y));
+        CurrentChunk = anchor.Scene;
+        _blendTarget = CaptureLook();
+        QueueAroundPlayer();
+        FinishLoading();   // the first ring is there on the first frame
+    }
+
+    /// <summary>Blocks until every queued chunk is in the world.</summary>
+    public void FinishLoading()
+    {
+        for (int guard = 0; _pending.Count > 0 && guard < 100000; guard++)
+            Pump(int.MaxValue, wait: true);
+        _world.Flush();
+    }
+
+    public void Update(float dt)
+    {
+        if (!_initialised && !_autoChecked) { _autoChecked = true; AutoMerge(); }   // a group marked "auto" merges when the player is in one of its scenes
+        if (!Enabled) { if (_initialised) ResetChunks(); return; }
+        if (!_initialised) Begin();
+        if (_anchor is null) return;
+
+        QueueAroundPlayer();
+        UnloadFar();
+        Pump(ObjectsPerFrame, wait: false);
+        ClampCamera();
+        Blend(dt);
+    }
+
+    // ---- which chunks -----------------------------------------------------------------------------
+
+    /// <summary>
+    /// The chunks that take part in streaming: the scenes of the build (so the editor and the built player agree),
+    /// or every chunk when the build list is empty. The main scene is always part of it.
+    /// </summary>
+    private List<Chunk> Candidates()
+    {
+        var inBuild = SceneManager.Config.EnabledScenes.Select(b => SceneManager.NameOf(b.Path)).ToList();
+        return WorldLayout.Chunks
+            .Where(c => inBuild.Count == 0
+                        || inBuild.Contains(c.Scene, StringComparer.OrdinalIgnoreCase)
+                        || string.Equals(c.Scene, _anchor?.Scene, StringComparison.OrdinalIgnoreCase)
+                        || IsMerged(c.Scene))
+            .ToList();
+    }
+
+    private Vector3 PlayerPosition => _world.TryGetCameraPosition(out var p) ? p : CellCenter(_anchor!.X, _anchor.Y);
+
+    private static int Distance(int ax, int ay, int bx, int by) => Math.Max(Math.Abs(ax - bx), Math.Abs(ay - by));
+
+    private void QueueAroundPlayer()
+    {
+        var (px, py) = CellAt(PlayerPosition);
+        var here = WorldLayout.At(px, py);
+        CurrentChunk = here?.Scene ?? CurrentChunk;
+
+        foreach (var chunk in _candidates
+                     .Where(c => Distance(c.X, c.Y, px, py) <= Reach || IsMerged(c.Scene))
+                     .OrderBy(c => Distance(c.X, c.Y, px, py)))
+        {
+            if (string.Equals(chunk.Scene, _anchor!.Scene, StringComparison.OrdinalIgnoreCase)) continue;
+            if (_loaded.Any(l => l.X == chunk.X && l.Y == chunk.Y) || _pending.Any(p => p.X == chunk.X && p.Y == chunk.Y)) continue;
+            if (!SceneManager.Exists(chunk.Scene)) continue;
+            Queue(chunk);
+        }
+    }
+
+    private void Queue(Chunk chunk)
+    {
+        var pl = new PendingLoad { Scene = chunk.Scene, X = chunk.X, Y = chunk.Y };
+        string file = SceneManager.FileFor(chunk.Scene);
+        pl.Parse = Background ? Task.Run(() => ParseFile(file)) : Task.FromResult(ParseFile(file));
+        _pending.Add(pl);
+    }
+
+    private static JsonObject? ParseFile(string file)
+    {
+        try { return JsonNode.Parse(File.ReadAllText(file)) as JsonObject; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            Console.Error.WriteLine($"[stream] could not read {file}: {ex.Message}");
+            return null;
+        }
+    }
+
+    private void UnloadFar()
+    {
+        var (px, py) = CellAt(PlayerPosition);
+        for (int i = _loaded.Count - 1; i >= 0; i--)
+        {
+            var c = _loaded[i];
+            if (IsMerged(c.Scene) || Distance(c.X, c.Y, px, py) <= Reach + 1) continue;
+            foreach (var o in c.Objects) if (!o.Destroyed) _world.Destroy(o);
+            _loaded.RemoveAt(i);
+        }
+        // queued chunks the player has already walked away from are not worth loading
+        _pending.RemoveAll(p => p.Chunk is null && !IsMerged(p.Scene) && Distance(p.X, p.Y, px, py) > Reach + 1);
+    }
+
+    // ---- creating the objects ---------------------------------------------------------------------
+
+    private void Pump(int budget, bool wait)
+    {
+        for (int i = 0; i < _pending.Count && budget > 0; )
+        {
+            var p = _pending[i];
+            if (p.Root is null && p.Chunk is null)
+            {
+                if (!p.Parse!.IsCompleted && !wait) { i++; continue; }
+                p.Root = p.Parse.GetAwaiter().GetResult();
+                if (p.Root is null) { _pending.RemoveAt(i); continue; }   // unreadable: skip this chunk
+
+                var chunk = new LoadedChunk { Scene = p.Scene, X = p.X, Y = p.Y, Offset = CellCenter(p.X, p.Y) };
+                SceneSerializer.ApplySettings(chunk.Settings, p.Root);
+                p.Chunk = chunk;
+                p.Objects = p.Root["objects"] as JsonArray;
+                _loaded.Add(chunk);
+            }
+
+            var lc = p.Chunk!;
+            var arr = p.Objects;
+            while (arr is not null && p.Next < arr.Count && budget > 0)
+            {
+                budget--;
+                if (arr[p.Next++] is not JsonObject o) continue;
+                try
+                {
+                    if (SceneSerializer.ReadChunkObject(_world, o, lc.Offset, lc.Scene) is { } go) lc.Objects.Add(go);
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or FormatException or InvalidCastException or ArgumentException or KeyNotFoundException)
+                {
+                    Console.Error.WriteLine($"[stream] bad object in '{lc.Scene}': {ex.Message}");
+                }
+            }
+
+            if (arr is null || p.Next >= arr.Count)
+            {
+                lc.Complete = true;
+                _pending.RemoveAt(i);
+            }
+            else i++;
+        }
+    }
+
+    // ---- camera and light -------------------------------------------------------------------------
+
+    /// <summary>Keeps the camera inside the whole map (every cell of the grid) instead of inside the main scene.</summary>
+    private void ClampCamera()
+    {
+        if (!_world.ClampCamera || _world.FindCameraObject() is not { } cam) return;
+        float half = _cell / 2f;
+        var ext = _enabled ? _extent : MergedExtent() ?? _extent;   // streaming off: only the open scene plus what is merged into it
+        float minX = (ext.MinX - _anchor!.X) * _cell - half, maxX = (ext.MaxX - _anchor.X) * _cell + half;
+        float minZ = (ext.MinY - _anchor.Y) * _cell - half, maxZ = (ext.MaxY - _anchor.Y) * _cell + half;
+        var p = cam.Transform.Position;
+        var c = new Vector3(Math.Clamp(p.X, minX, maxX), p.Y, Math.Clamp(p.Z, minZ, maxZ));
+        if (c != p) cam.Transform.Position = c;
+    }
+
+    /// <summary>Sky, sun colour, sun strength and ambient light move toward the chunk the player is in.</summary>
+    private void Blend(float dt)
+    {
+        if (CurrentChunk is null) return;
+        World? target = string.Equals(CurrentChunk, _anchor!.Scene, StringComparison.OrdinalIgnoreCase)
+            ? _blendTarget   // the main scene's own look, remembered when streaming began
+            : _loaded.FirstOrDefault(c => c.Complete && string.Equals(c.Scene, CurrentChunk, StringComparison.OrdinalIgnoreCase))?.Settings;
+        if (target is null) return;
+
+        float k = 1f - MathF.Exp(-BlendSpeed * dt);
+        _world.SkyTop = Lerp(_world.SkyTop, target.SkyTop, k);
+        _world.SkyBottom = Lerp(_world.SkyBottom, target.SkyBottom, k);
+        _world.Sun.Color = Lerp(_world.Sun.Color, target.Sun.Color, k);
+        _world.Sun.Intensity += (target.Sun.Intensity - _world.Sun.Intensity) * k;
+        _world.Sun.Ambient += (target.Sun.Ambient - _world.Sun.Ambient) * k;
+    }
+
+    private World CaptureLook()
+    {
+        var w = new World { SkyTop = _world.SkyTop, SkyBottom = _world.SkyBottom };
+        w.Sun.Color = _world.Sun.Color;
+        w.Sun.Intensity = _world.Sun.Intensity;
+        w.Sun.Ambient = _world.Sun.Ambient;
+        return w;
+    }
+
+    private static Color Lerp(Color a, Color b, float t) => new(
+        (byte)Math.Clamp((int)MathF.Round(a.R + (b.R - a.R) * t), 0, 255),
+        (byte)Math.Clamp((int)MathF.Round(a.G + (b.G - a.G) * t), 0, 255),
+        (byte)Math.Clamp((int)MathF.Round(a.B + (b.B - a.B) * t), 0, 255),
+        (byte)Math.Clamp((int)MathF.Round(a.A + (b.A - a.A) * t), 0, 255));
+
+    // ---- chunk debugger ---------------------------------------------------------------------------
+
+    /// <summary>One chunk as the debug view shows it.</summary>
+    public readonly record struct DebugChunk(string Scene, int X, int Y, Vector3 Center, float SizeX, float SizeZ, string State, int Objects);
+
+    private List<DebugChunk> _debugCache = new();
+    private long _debugStamp;
+    private float _debugCell = 60f;
+
+    /// <summary>Player cell and loaded radius for the debug view (radius -1 when not streaming).</summary>
+    public (int X, int Y, int Radius) DebugPlayer { get; private set; }
+
+    public float DebugCellSize => Active ? _cell : _debugCell;
+
+    /// <summary>
+    /// Every chunk around the open scene with its state: main (the open scene), here (the player stands in it),
+    /// loaded, merged (joined into the open scene), loading, far (streamed scene that is not loaded right now) or map (only shown, not playing).
+    /// </summary>
+    public IReadOnlyList<DebugChunk> Describe()
+    {
+        long now = Environment.TickCount64;
+        if (!Active && now - _debugStamp < 500 && _debugCache.Count > 0) return _debugCache;
+        _debugStamp = now;
+
+        var list = new List<DebugChunk>();
+        var anchor = Active ? _anchor : WorldLayout.Of(SceneManager.CurrentName);
+        if (anchor is null) { _debugCache = list; DebugPlayer = (0, 0, -1); return list; }
+
+        float SizeXOf(string sc, out float z)
+        {
+            if (string.Equals(sc, anchor.Scene, StringComparison.OrdinalIgnoreCase)) { z = _world.SizeZ; return _world.SizeX; }
+            var (x, zz) = WorldLayout.SizeOf(sc); z = zz; return x;
+        }
+
+        var chunks = Active ? _candidates : WorldLayout.Chunks.ToList();
+        float cell = 10f;
+        foreach (var c in chunks) { float x = SizeXOf(c.Scene, out float z); cell = MathF.Max(cell, MathF.Max(x, z)); }
+        if (Active) cell = _cell;
+        _debugCell = cell;
+
+        var (px, py) = Active ? CellAt(PlayerPosition) : (anchor.X, anchor.Y);
+        DebugPlayer = (px, py, Active ? Math.Max(0, Reach) : -1);
+
+        foreach (var c in chunks)
+        {
+            float sx = SizeXOf(c.Scene, out float sz);
+            var center = new Vector3((c.X - anchor.X) * cell, 0f, (c.Y - anchor.Y) * cell);
+            bool isAnchor = string.Equals(c.Scene, anchor.Scene, StringComparison.OrdinalIgnoreCase);
+            string state;
+            int objects = 0;
+            if (!Active) state = isAnchor ? "main" : "map";
+            else if (isAnchor) { state = "main"; objects = _world.Objects.Count(o => o.Chunk is null && !o.Destroyed); }
+            else if (_loaded.FirstOrDefault(l => l.X == c.X && l.Y == c.Y) is { } l) { state = l.Complete ? (IsMerged(c.Scene) ? "merged" : "loaded") : "loading"; objects = l.Objects.Count(o => !o.Destroyed); }
+            else state = _pending.Any(p => p.X == c.X && p.Y == c.Y) ? "loading" : IsMerged(c.Scene) ? "loading" : "far";
+            list.Add(new DebugChunk(c.Scene, c.X, c.Y, center, sx, sz, state, objects));
+        }
+        _debugCache = list;
+        return list;
+    }
+
+    public static Color DebugColor(string state, bool here) =>
+        here ? new Color(255, 220, 70, 255) :
+        state switch
+        {
+            "main" => new Color(90, 160, 255, 255),
+            "loaded" => new Color(90, 230, 120, 255),
+            "merged" => new Color(200, 120, 255, 255),
+            "loading" => new Color(255, 160, 50, 255),
+            _ => new Color(150, 150, 165, 255),
+        };
+
+    /// <summary>Draws chunk borders in the 3D view (call inside BeginMode3D).</summary>
+    public void DrawDebug()
+    {
+        var chunks = Describe();
+        if (chunks.Count == 0) return;
+        float cell = DebugCellSize, half = cell / 2f;
+        var (px, py, radius) = DebugPlayer;
+        var anchorChunk = chunks.FirstOrDefault(c => c.State == "main");
+
+        foreach (var c in chunks)
+        {
+            bool here = radius >= 0 && c.X == px && c.Y == py;
+            var col = DebugColor(c.State, here);
+            // the cell (what the map reserves for the scene) in dim colour, the scene's own rectangle bright
+            DrawRect(c.Center, half, half, col with { A = 70 }, 0.04f);
+            DrawRect(c.Center, c.SizeX / 2f, c.SizeZ / 2f, col, 0.06f);
+            if (c.State != "far" && c.State != "map")
+                foreach (var (sx, sz) in new[] { (-1, -1), (1, -1), (1, 1), (-1, 1) })
+                {
+                    var b = c.Center + new Vector3(sx * c.SizeX / 2f, 0.06f, sz * c.SizeZ / 2f);
+                    Rl.DrawLine3D(b, b + new Vector3(0, here ? 14f : 8f, 0), col);
+                }
+        }
+
+        if (radius >= 0 && anchorChunk.Scene is not null)
+        {
+            // the loaded area: cells within the radius of the player's cell
+            var mid = anchorChunk.Center + new Vector3((px - anchorChunk.X) * cell, 0f, (py - anchorChunk.Y) * cell);
+            float r = (radius + 0.5f) * cell;
+            DrawRect(mid, r, r, new Color(255, 255, 255, 200), 0.1f);
+            if (_world.TryGetCameraPosition(out var cam))
+            {
+                Rl.DrawLine3D(new Vector3(cam.X - 2, 0.12f, cam.Z), new Vector3(cam.X + 2, 0.12f, cam.Z), Color.White);
+                Rl.DrawLine3D(new Vector3(cam.X, 0.12f, cam.Z - 2), new Vector3(cam.X, 0.12f, cam.Z + 2), Color.White);
+                Rl.DrawLine3D(new Vector3(cam.X, 0.12f, cam.Z), cam, new Color(255, 255, 255, 90));
+            }
+        }
+    }
+
+    private static void DrawRect(Vector3 c, float hx, float hz, Color col, float y)
+    {
+        var a = new Vector3(c.X - hx, y, c.Z - hz); var b = new Vector3(c.X + hx, y, c.Z - hz);
+        var d = new Vector3(c.X + hx, y, c.Z + hz); var e = new Vector3(c.X - hx, y, c.Z + hz);
+        Rl.DrawLine3D(a, b, col); Rl.DrawLine3D(b, d, col); Rl.DrawLine3D(d, e, col); Rl.DrawLine3D(e, a, col);
+    }
+
+    /// <summary>Names and a status line on screen (call after the 3D pass).</summary>
+    public void DrawDebugOverlay()
+    {
+        var chunks = Describe();
+        if (chunks.Count == 0 || !_world.TryGetCamera(out var camera)) return;
+        var (px, py, radius) = DebugPlayer;
+        var fwd = Vector3.Normalize(camera.Target - camera.Position);
+        int sw = Rl.GetScreenWidth(), sh = Rl.GetScreenHeight();
+
+        foreach (var c in chunks)
+        {
+            var pos = c.Center + new Vector3(0, 3f, 0);
+            if (Vector3.Dot(pos - camera.Position, fwd) <= 0.1f) continue;   // behind the camera
+            var s = Rl.GetWorldToScreen(pos, camera);
+            if (s.X < -200 || s.X > sw + 200 || s.Y < -50 || s.Y > sh + 50) continue;
+            bool here = radius >= 0 && c.X == px && c.Y == py;
+            var col = DebugColor(c.State, here);
+            string line1 = c.Scene, line2 = $"({c.X}, {c.Y})  {(here ? "YOU ARE HERE  " : "")}{c.State}" + (c.Objects > 0 ? $"  {c.Objects} obj" : "");
+            int w1 = Rl.MeasureText(line1, 22), w2 = Rl.MeasureText(line2, 16);
+            Rl.DrawRectangle((int)s.X - Math.Max(w1, w2) / 2 - 8, (int)s.Y - 6, Math.Max(w1, w2) + 16, 50, new Color(0, 0, 0, 170));
+            Rl.DrawText(line1, (int)s.X - w1 / 2, (int)s.Y, 22, col);
+            Rl.DrawText(line2, (int)s.X - w2 / 2, (int)s.Y + 26, 16, Color.White);
+        }
+
+        string head = radius >= 0
+            ? $"In {CurrentChunk ?? "-"} | cell {px},{py} | loaded {chunks.Count(c => c.State is "loaded" or "main" or "merged")}/{chunks.Count} | radius {radius}{(_merged.Count > 0 ? " | merged: " + string.Join("+", _merged) : "")} | F3 hides"
+            : "Chunk map (press Play to stream) | F3 hides";
+        int hw = Rl.MeasureText(head, 16), hx = Math.Max(8, (int)(sw * 0.44f) - hw / 2), hy = sh - 170;
+        Rl.DrawRectangle(hx - 12, hy - 6, hw + 24, 30, new Color(0, 0, 0, 180));
+        Rl.DrawText(head, hx, hy, 16, Color.White);
+    }
+}
+using Raylib_cs;
+using Rl = Raylib_cs.Raylib;
+
+namespace SharpEngine.Graphics3D.Editor;
+
+/// <summary>
+/// Manage Scenes: every scene file in a list with check boxes, so many scenes can be opened, selected and deleted at once.
+/// Deleted scenes are moved to Backups/DeletedScenes (not erased), and are taken out of the build list, the world map and merge groups.
+/// Open with the toolbar's Manage button or Ctrl+Shift+M.
+/// </summary>
+public static class SceneManagerWindow
+{
+    private static readonly HashSet<string> _checked = new(StringComparer.OrdinalIgnoreCase);
+    private static float _scroll;
+    private static string _info = "";
+    private static bool _infoBad;
+    private static bool _confirm;
+    private static string? _lastClicked;
+    private static double _lastClickTime;
+    private static string? _openRequest;
+
+    public static bool IsOpen { get; private set; }
+
+    public static void Open() { IsOpen = true; _confirm = false; _info = ""; _checked.RemoveWhere(n => !SceneManager.Exists(n)); }
+    public static void Close() { IsOpen = false; _confirm = false; }
+
+    /// <summary>The scene the user double-clicked / pressed Open for (taken once by the editor).</summary>
+    internal static string? TakeOpenRequest() { var r = _openRequest; _openRequest = null; return r; }
+
+    public static void Draw(World world)
+    {
+        if (!IsOpen) return;
+        float sw = Gui.ScreenWidth, sh = Gui.ScreenHeight;
+        float w = MathF.Min(sw - 40f, 560f), h = MathF.Min(sh - 40f, 560f);
+        var d = new Rectangle((sw - w) / 2f, (sh - h) / 2f, w, h);
+        Rl.DrawRectangle(0, 0, (int)sw, (int)sh, new Color(0, 0, 0, 130));
+        Rl.DrawRectangleRec(d, new Color(44, 46, 52, 255));
+        Rl.DrawRectangleLinesEx(d, 1f, new Color(20, 20, 24, 255));
+        Gui.SetScope(9300);
+
+        Rl.DrawRectangleRec(new Rectangle(d.X, d.Y, d.Width, 34), new Color(32, 34, 40, 255));
+        Gui.Text(d.X + 10, d.Y + 7, "Manage Scenes", Gui.TextCol);
+        if (Gui.Button(new Rectangle(d.X + d.Width - 30, d.Y + 5, 24, 24), "x")) { Close(); return; }
+
+        var scenes = SceneManager.AvailableScenes();
+        var inBuild = SceneManager.Config.Scenes.Select(s => SceneManager.NameOf(s.Path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        _checked.RemoveWhere(n => !scenes.Contains(n, StringComparer.OrdinalIgnoreCase));
+
+        float y = d.Y + 42;
+        if (Gui.Button(new Rectangle(d.X + 8, y, 90, 26), "Select all")) { foreach (var n in scenes) if (!IsCurrent(n)) _checked.Add(n); _confirm = false; }
+        if (Gui.Button(new Rectangle(d.X + 104, y, 90, 26), "Select none")) { _checked.Clear(); _confirm = false; }
+        Gui.Text(d.X + 204, y + 5, Gui.FitText($"{scenes.Count} scene(s), {_checked.Count} selected", d.Width - 214), Gui.TextDim);
+
+        y += 34;
+        var list = new Rectangle(d.X + 8, y, d.Width - 16, d.Height - (y - d.Y) - 96);
+        Rl.DrawRectangleRec(list, new Color(36, 38, 44, 255));
+        Gui.SetScope(9310);
+        const float rowH = 26;
+        Gui.BeginScroll(list, ref _scroll, MathF.Max(1, scenes.Count) * rowH + 4);
+        float ry = list.Y + 2 - _scroll;
+        string? openNow = null;
+        foreach (var name in scenes)
+        {
+            if (ry + rowH >= list.Y && ry <= list.Y + list.Height)
+            {
+                var row = new Rectangle(list.X + 2, ry, list.Width - 12, rowH);
+                bool current = IsCurrent(name);
+                bool on = _checked.Contains(name);
+                if (on) Rl.DrawRectangleRec(row, new Color(120, 50, 50, 255)); else if (Gui.IsHot(row)) Rl.DrawRectangleRec(row, Gui.Hover);
+
+                var box = new Rectangle(row.X + 6, row.Y + 3, 20, rowH - 6);
+                bool v = on;
+                if (Gui.Checkbox(box, "msc" + name, "", ref v, enabled: !current, tick: true)) { if (v) _checked.Add(name); else _checked.Remove(name); _confirm = false; }
+                else if (Gui.IsHot(row) && Gui.LeftPressed && Gui.Mouse.X > box.X + box.Width + 4)
+                {
+                    double now = Rl.GetTime();
+                    if (_lastClicked == name && now - _lastClickTime < 0.45) openNow = name;
+                    else if (!current) { if (!_checked.Remove(name)) _checked.Add(name); _confirm = false; }
+                    _lastClicked = name; _lastClickTime = now;
+                }
+
+                string tags = (current ? "  [open]" : "") + (inBuild.Contains(name) ? "  [in build]" : "");
+                Gui.TextLeft(new Rectangle(row.X + 34, row.Y, row.Width - 40, row.Height), Gui.FitText(name + tags, row.Width - 44),
+                    current ? new Color(150, 200, 255, 255) : Gui.TextCol);
+            }
+            ry += rowH;
+        }
+        if (scenes.Count == 0) Gui.Text(list.X + 10, list.Y + 8, "No saved scenes.", Gui.TextDim);
+        Gui.EndScroll(list);
+
+        // bottom
+        float by = d.Y + d.Height - 84;
+        Gui.Text(d.X + 10, by, Gui.FitText("Click rows to tick them. Double-click opens a scene. Deleted scenes go to Backups/DeletedScenes.", d.Width - 20), Gui.TextDim);
+        if (_info.Length > 0) Gui.Text(d.X + 10, by + 20, Gui.FitText(_info, d.Width - 20), _infoBad ? new Color(240, 120, 120, 255) : new Color(120, 215, 130, 255));
+
+        float bb = d.Y + d.Height - 38;
+        bool any = _checked.Count > 0;
+        string label = !any ? "Delete Selected" : _confirm ? $"Really delete {_checked.Count}? Click again" : $"Delete Selected ({_checked.Count})";
+        if (Gui.Button(new Rectangle(d.X + 8, bb, 260, 28), label, _confirm, any))
+        {
+            if (!_confirm) _confirm = true;
+            else
+            {
+                int done = SceneManager.DeleteMany(_checked.ToList(), out var problems);
+                _checked.Clear(); _confirm = false;
+                _infoBad = problems.Count > 0;
+                _info = $"Deleted {done} scene(s)." + (problems.Count > 0 ? " " + problems[0] : "");
+            }
+        }
+        if (Gui.Button(new Rectangle(d.X + d.Width - 88, bb, 80, 28), "Close")) Close();
+
+        if (openNow is not null) { _openRequest = openNow; Close(); }
+        if (Rl.IsKeyPressed(KeyboardKey.Escape) && !Gui.PopupOpen && !Gui.IsEditing) Close();
+    }
+
+    private static bool IsCurrent(string name) => string.Equals(name, SceneManager.CurrentName, StringComparison.OrdinalIgnoreCase);
+}
+using System.Numerics;
+using Raylib_cs;
+using SharpEngine.Graphics3D.Scripting;
+using Rl = Raylib_cs.Raylib;
+
+namespace SharpEngine.Graphics3D.Editor;
+
+/// <summary>
+/// The in-game code editor. Lists the project's Scripts/*.cs files, edits them with syntax colours, and compiles them
+/// (Ctrl+S) so the classes show up as components you can add to an object or pin to a scene.
+/// </summary>
+public static class CodeEditorWindow
+{
+    private const int FontPx = 16;
+    private const float LineH = 20f;
+
+    private static readonly Color Body = new(40, 42, 48, 255);
+    private static readonly Color Well = new(26, 27, 31, 255);
+    private static readonly Color Gutter = new(32, 33, 38, 255);
+    private static readonly Color Line = new(18, 19, 22, 255);
+    private static readonly Color CurrentLine = new(36, 38, 46, 255);
+    private static readonly Color SelectionCol = new(52, 100, 170, 160);
+    private static readonly Color Bad = new(240, 120, 120, 255);
+    private static readonly Color Good = new(120, 215, 130, 255);
+    private static readonly Color Warn = new(235, 200, 100, 255);
+
+    private static readonly Color[] TokenColors =
+    {
+        new(224, 226, 230, 255),   // plain
+        new(86, 156, 214, 255),    // keyword
+        new(78, 201, 176, 255),    // type
+        new(214, 157, 133, 255),   // string
+        new(106, 153, 85, 255),    // comment
+        new(181, 206, 168, 255),   // number
+        new(180, 184, 192, 255),   // punctuation
+    };
+
+    private sealed class Doc
+    {
+        public string Path = "";
+        public TextBuffer Buffer = new();
+        public Token[][] Kinds = Array.Empty<Token[]>();
+        public int KindsVersion = -1;
+    }
+
+    private static readonly Dictionary<string, Doc> Docs = new(StringComparer.OrdinalIgnoreCase);
+    private static List<string> _files = new();
+    private static Doc? _doc;
+    private static string _newName = "";
+    private static string _info = "";
+    private static Color _infoColor = Good;
+    private static string? _confirmDelete;
+    private static bool _focus;
+    private static float _scroll, _scrollX, _listScroll, _errScroll;
+    private static float _cw = 9f;
+    private static bool _followCaret;
+    private static bool _selecting;
+    private static double _lastClick;
+    private static int _lastClickLine = -1;
+
+    // completion popup
+    private static CompletionResult? _comp;
+    private static bool _compOpen;
+    private static int _compSel, _compTop;
+    private static Rectangle _compRect;
+    private const int CompRows = 10;
+
+    // the "Objects" panel: every scene, object and component of the project
+    private sealed record ObjRow(int Depth, string Key, string Label, string Detail, string Insert, bool Expandable, bool Open, Color Col);
+    private static bool _showObjects = true;
+    private static float _objScroll;
+    private static string _objFilter = "";
+    private static readonly HashSet<string> OpenNodes = new();
+    private static List<ObjRow> _objRows = new();
+    private static double _objRowsAt;
+    private static string _objRowsFilter = "\0";
+    private static int _objRowsVersion = -1, _objVersion;
+    private const float ObjPanelW = 280f;
+
+    // debug log panel
+    private static bool _showLog;
+    private static float _logScroll;
+    private static int _logSeen = -1;
+    private static bool _logInfo = true, _logWarn = true, _logErr = true, _logFollow = true;
+    private static LogEntry? _logSelected;
+
+    public static bool IsOpen { get; private set; }
+
+    /// <summary>Set by the editor: saves, compiles and applies the scripts. Returns a message and whether it worked.</summary>
+    public static Func<(string Message, bool Ok)>? Compile { get; set; }
+
+    public static void Open(string? file = null)
+    {
+        IsOpen = true;
+        _info = ""; _confirmDelete = null; _selecting = false;
+        Refresh();
+        if (file is not null) OpenFile(file);
+        else if (_doc is null && _files.Count > 0) OpenFile(_files[0]);
+        _focus = true;
+    }
+
+    /// <summary>Opens Scripts/World/WorldCode.cs (created from a template the first time): code for the whole world.</summary>
+    public static void OpenWorld()
+    {
+        try { Open(ScriptManager.EnsureWorldCode()); _showObjects = true; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Open(); Info("Could not create the world code file: " + ex.Message, true); }
+    }
+
+    public static void Close() { IsOpen = false; _focus = false; _compOpen = false; }
+
+    private static void Refresh() => _files = ScriptManager.Files().ToList();
+
+    private static bool IsWorldFile(string path) =>
+        System.IO.Path.GetRelativePath(ScriptManager.Directory, path).Replace('\\', '/').StartsWith(ScriptManager.WorldFolderName + "/", StringComparison.OrdinalIgnoreCase);
+
+    private static void Info(string text, bool error = false, bool warn = false)
+    {
+        _info = text;
+        _infoColor = error ? Bad : warn ? Warn : Good;
+    }
+
+    // ---- files -------------------------------------------------------------------------------
+
+    private static void OpenFile(string path)
+    {
+        if (!Docs.TryGetValue(path, out var d))
+        {
+            d = new Doc { Path = path };
+            try { d.Buffer.Text = File.ReadAllText(path); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Info("Could not read the file: " + ex.Message, true); return; }
+            Docs[path] = d;
+        }
+        else if (!d.Buffer.Dirty && File.Exists(path))
+        {
+            // pick up changes made outside the editor
+            try { var disk = File.ReadAllText(path); if (disk.Replace("\r\n", "\n") != d.Buffer.Text) d.Buffer.Text = disk; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+        _doc = d;
+        _scroll = _scrollX = 0f;
+        _confirmDelete = null;
+    }
+
+    private static bool Save(Doc d)
+    {
+        try
+        {
+            File.WriteAllText(d.Path, d.Buffer.Text);
+            d.Buffer.MarkSaved();
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Info("Could not save " + System.IO.Path.GetFileName(d.Path) + ": " + ex.Message, true);
+            return false;
+        }
+    }
+
+    private static void SaveAndCompile()
+    {
+        foreach (var d in Docs.Values.Where(d => d.Buffer.Dirty).ToList())
+            if (!Save(d)) return;
+        if (Compile is null) { Info("Saved.", false); return; }
+        try
+        {
+            var (message, ok) = Compile();
+            Info(message, !ok);
+        }
+        catch (Exception ex) when (ErrorLog.IsRecoverable(ex))
+        {
+            ErrorLog.Report("compiling", ex);
+            Info("Compile failed: " + ErrorLog.Unwrap(ex).Message + " (see Logs/errors.log)", true);
+        }
+    }
+
+    private static void CreateScript()
+    {
+        var clean = ScriptManager.SanitizeName(_newName);
+        if (clean is null) { Info("Type a name first (letters, digits, underscore).", true); return; }
+        try
+        {
+            var path = ScriptManager.CreateScript(clean);
+            _newName = "";
+            Refresh();
+            OpenFile(path);
+            _focus = true;
+            Info($"Created {clean}.cs. Press Ctrl+S to compile it.");
+        }
+        catch (Exception ex) when (ErrorLog.IsRecoverable(ex)) { Info(ErrorLog.Unwrap(ex).Message, true); }
+    }
+
+    private static void CreateMeshScript()
+    {
+        var clean = ScriptManager.SanitizeName(_newName);
+        if (clean is null) { Info("Type a name first (letters, digits, underscore).", true); return; }
+        try
+        {
+            var path = ScriptManager.CreateMeshScript(clean);
+            _newName = "";
+            Refresh();
+            OpenFile(path);
+            _focus = true;
+            Info($"Created {clean}.cs (mesh code). Press Ctrl+S to compile, then add it to an object.");
+        }
+        catch (Exception ex) when (ErrorLog.IsRecoverable(ex)) { Info(ErrorLog.Unwrap(ex).Message, true); }
+    }
+
+    private static void CreateEditorTool()
+    {
+        var clean = ScriptManager.SanitizeName(_newName);
+        if (clean is null) { Info("Type a name first (letters, digits, underscore).", true); return; }
+        try
+        {
+            var path = ScriptManager.CreateEditorScript(clean);
+            _newName = "";
+            Refresh();
+            OpenFile(path);
+            _focus = true;
+            Info($"Created Editor/{clean}.cs. Press Ctrl+S: its buttons, menu commands and panels appear in the editor right away.");
+        }
+        catch (Exception ex) when (ErrorLog.IsRecoverable(ex)) { Info(ErrorLog.Unwrap(ex).Message, true); }
+    }
+
+    private static void CreateWorldScript()
+    {
+        var clean = ScriptManager.SanitizeName(_newName);
+        if (clean is null) { Info("Type a name first (letters, digits, underscore).", true); return; }
+        try
+        {
+            var path = ScriptManager.CreateScript(clean, world: true);
+            _newName = "";
+            Refresh();
+            OpenFile(path);
+            _focus = true;
+            Info($"Created World/{clean}.cs. Press Ctrl+S to compile it.");
+        }
+        catch (Exception ex) when (ErrorLog.IsRecoverable(ex)) { Info(ErrorLog.Unwrap(ex).Message, true); }
+    }
+
+    private static void DeleteFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+            Docs.Remove(path);
+            if (_doc?.Path == path) _doc = null;
+            Refresh();
+            if (_doc is null && _files.Count > 0) OpenFile(_files[0]);
+            Info("Deleted " + System.IO.Path.GetFileName(path) + ". Press Ctrl+S to compile without it.", warn: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Info(ex.Message, true); }
+    }
+
+    // ---- window ------------------------------------------------------------------------------
+
+    public static void Draw(World world)
+    {
+        if (!IsOpen) return;
+        bool editingAtStart = Gui.IsEditing;   // Esc that cancels typing in the name field must not also close the window
+        try { DrawWindow(world, editingAtStart); }
+        catch (Exception ex) when (ErrorLog.IsRecoverable(ex))
+        {
+            // a problem in the editor window closes only the window (unsaved text stays in memory and is kept when it is reopened)
+            ErrorLog.Report("code editor", ex);
+            Rl.EndScissorMode();
+            IsOpen = false;
+            _focus = false;
+        }
+    }
+
+    private static void DrawWindow(World world, bool editingAtStart)
+    {
+        float sw = Gui.ScreenWidth, sh = Gui.ScreenHeight;
+        float w = MathF.Min(sw - 30f, 1180f), h = MathF.Min(sh - 30f, 760f);
+        var d = new Rectangle((sw - w) / 2f, (sh - h) / 2f, w, h);
+
+        Rl.DrawRectangle(0, 0, (int)sw, (int)sh, new Color(0, 0, 0, 130));
+        Rl.DrawRectangleRec(new Rectangle(d.X + 5, d.Y + 6, d.Width, d.Height), new Color(0, 0, 0, 100));
+        Rl.DrawRectangleRec(d, Body);
+        Rl.DrawRectangleLinesEx(d, 1f, Line);
+
+        Rl.DrawRectangleRec(new Rectangle(d.X, d.Y, d.Width, 40), new Color(242, 242, 242, 255));
+        string title = (_doc is not null && IsWorldFile(_doc.Path) ? "World Code" : "Code") + (_doc is not null ? "  -  " + System.IO.Path.GetFileName(_doc.Path) + (_doc.Buffer.Dirty ? " *" : "") : "");
+        Gui.TextSized(d.X + 12, d.Y + 8, Gui.FitText(title, d.Width - 80), 26, new Color(100, 100, 100, 255));
+        var close = new Rectangle(d.X + d.Width - 40, d.Y + 6, 28, 28);
+        bool closeHover = Gui.IsHot(close);
+        Rl.DrawRectangleRec(close, closeHover ? new Color(205, 205, 205, 255) : new Color(226, 226, 226, 255));
+        var xc = new Color(150, 150, 150, 255);
+        Rl.DrawLineEx(new Vector2(close.X + 8, close.Y + 8), new Vector2(close.X + 20, close.Y + 20), 2f, xc);
+        Rl.DrawLineEx(new Vector2(close.X + 20, close.Y + 8), new Vector2(close.X + 8, close.Y + 20), 2f, xc);
+        if (closeHover && Gui.LeftPressed) Close();
+
+        float listW = 210f;
+        var list = new Rectangle(d.X + 10, d.Y + 50, listW, d.Height - 60);
+        var diag = ScriptManager.Last;
+        int diagCount = diag?.Diagnostics.Count ?? 0;
+        float errH = _showLog ? 190f : diagCount > 0 || ScriptManager.RuntimeError is not null ? 128f : 0f;
+        var status = new Rectangle(d.X + 10 + listW + 10, d.Y + d.Height - 34, d.Width - listW - 30, 26);
+        float panelW = _showObjects ? ObjPanelW + 10f : 0f;
+        var errors = new Rectangle(status.X, status.Y - errH - (errH > 0 ? 6 : 0), status.Width - panelW, errH);
+        var editor = new Rectangle(status.X, d.Y + 50, status.Width - panelW, errors.Y - (d.Y + 50) - (errH > 0 ? 6 : 6));
+        bool compAtStart = _compOpen;
+
+        DrawList(list);
+        DrawEditor(editor);
+        if (errH > 0) { if (_showLog) DrawLog(errors); else DrawErrors(errors); }
+        if (_showObjects) DrawObjects(new Rectangle(editor.X + editor.Width + 10, d.Y + 50, ObjPanelW, status.Y - 6 - (d.Y + 50)));
+        DrawStatus(status);
+        DrawCompletion(editor);
+
+        // keyboard
+        if (Rl.IsKeyPressed(KeyboardKey.Escape) && !Gui.PopupOpen && !editingAtStart && !Gui.IsEditing && !compAtStart) Close();
+    }
+
+    // ---- file list ---------------------------------------------------------------------------
+
+    private static void DrawList(Rectangle r)
+    {
+        Rl.DrawRectangleRec(r, Well);
+        Rl.DrawRectangleLinesEx(r, 1f, Line);
+        Gui.SetScope(7600);
+        Gui.TextSized(r.X + 10, r.Y + 8, "Scripts", 18, Color.White, bold: true);
+
+        var view = new Rectangle(r.X + 1, r.Y + 34, r.Width - 2, r.Height - 34 - 156);
+        Gui.BeginScroll(view, ref _listScroll, _files.Count * 24f + 6);
+        float y = view.Y - _listScroll + 2;
+        if (_files.Count == 0)
+            Gui.Text(view.X + 10, y + 4, "No scripts yet.", Gui.TextDim);
+        foreach (var f in _files.ToList())
+        {
+            var row = new Rectangle(view.X + 3, y, view.Width - 10, 22);
+            bool sel = _doc?.Path == f;
+            bool hot = Gui.IsHot(row);
+            Rl.DrawRectangleRec(row, sel ? Gui.Accent : hot ? Gui.Hover : Well);
+            bool dirty = Docs.TryGetValue(f, out var dd) && dd.Buffer.Dirty;
+            var name = System.IO.Path.GetRelativePath(ScriptManager.Directory, f);
+            Gui.TextLeft(row, name + (dirty ? " *" : ""), Color.White);
+            if (hot && Gui.LeftPressed && !Gui.Busy) { OpenFile(f); _focus = true; }
+            y += 24;
+        }
+        Gui.EndScroll(view);
+
+        float by = r.Y + r.Height - 180;
+        Gui.SetScope(7601);
+        Gui.Text(r.X + 10, by, "New script", Gui.TextDim);
+        Gui.TextField(new Rectangle(r.X + 10, by + 20, r.Width - 20, 24), "newname", ref _newName, "Name, e.g. Spin");
+        if (Gui.Button(new Rectangle(r.X + 10, by + 50, r.Width - 20, 26), "Create Script")) CreateScript();
+        if (Gui.Button(new Rectangle(r.X + 10, by + 80, r.Width - 20, 26), "Create World Script")) CreateWorldScript();
+        if (Gui.Button(new Rectangle(r.X + 10, by + 110, r.Width - 20, 26), "Create Mesh Script")) CreateMeshScript();
+        if (Gui.Button(new Rectangle(r.X + 10, by + 140, r.Width - 20, 26), "Create Editor Tool")) CreateEditorTool();
+        if (_doc is not null)
+        {
+            bool confirm = _confirmDelete == _doc.Path;
+            if (Gui.Button(new Rectangle(r.X + 10, by - 30, r.Width - 20, 24), confirm ? "Click again to delete" : "Delete This Script"))
+            {
+                if (confirm) DeleteFile(_doc.Path); else _confirmDelete = _doc.Path;
+            }
+        }
+    }
+
+    // ---- the text ----------------------------------------------------------------------------
+
+    private static void EnsureKinds(Doc d)
+    {
+        if (d.KindsVersion == d.Buffer.Version && d.Kinds.Length == d.Buffer.LineCount) return;
+        d.Kinds = new Token[d.Buffer.LineCount][];
+        bool block = false;
+        for (int i = 0; i < d.Buffer.LineCount; i++)
+        {
+            var line = d.Buffer.GetLine(i);
+            d.Kinds[i] = new Token[line.Length];
+            block = CSharpHighlighter.Classify(line, block, d.Kinds[i]);
+        }
+        d.KindsVersion = d.Buffer.Version;
+    }
+
+    private static void DrawEditor(Rectangle r)
+    {
+        Rl.DrawRectangleRec(r, Well);
+        Rl.DrawRectangleLinesEx(r, 1f, Line);
+        _cw = MathF.Max(7f, MathF.Ceiling(Rl.MeasureText("0123456789abcdefghijklmnopqrstuvwxyz", FontPx) / 36f));
+
+        if (_doc is null)
+        {
+            Gui.Text(r.X + 20, r.Y + 20, "Create a script on the left, or pick one.", Gui.TextDim);
+            Gui.Text(r.X + 20, r.Y + 46, "A script is a C# class that derives from Component. After Ctrl+S it appears in Add Component", Gui.TextDim);
+            Gui.Text(r.X + 20, r.Y + 68, "and can be added to an object or pinned to a scene.", Gui.TextDim);
+            return;
+        }
+
+        var d = _doc;
+        var buf = d.Buffer;
+        EnsureKinds(d);
+
+        int digits = Math.Max(3, buf.LineCount.ToString().Length);
+        float gutterW = digits * _cw + 18f;
+        var textArea = new Rectangle(r.X + gutterW, r.Y + 1, r.Width - gutterW - 1, r.Height - 2);
+        bool hover = Gui.IsHot(textArea);
+
+        HandleInput(buf, textArea, hover);
+        EnsureKinds(d);   // the input above may have changed the text
+
+        // keep the caret on screen after it moved
+        if (_followCaret)
+        {
+            float cy = buf.Line * LineH, cx = buf.Col * _cw;
+            if (cy < _scroll) _scroll = cy;
+            if (cy + LineH > _scroll + textArea.Height - 8) _scroll = cy + LineH - textArea.Height + 8;
+            if (cx < _scrollX) _scrollX = MathF.Max(0, cx - 40);
+            if (cx + 24 > _scrollX + textArea.Width - 20) _scrollX = cx + 24 - textArea.Width + 20;
+            _followCaret = false;
+        }
+
+        // gutter
+        Rl.DrawRectangleRec(new Rectangle(r.X + 1, r.Y + 1, gutterW, r.Height - 2), Gutter);
+
+        float contentH = buf.LineCount * LineH + 24f;
+        Gui.BeginScroll(textArea, ref _scroll, contentH);
+
+        var errLines = new HashSet<int>();
+        if (ScriptManager.Last is { } last)
+            foreach (var e in last.Diagnostics)
+                if (e.IsError && string.Equals(Path.GetFileName(d.Path), e.File, StringComparison.OrdinalIgnoreCase)) errLines.Add(e.Line - 1);
+
+        int first = Math.Max(0, (int)(_scroll / LineH));
+        int lastLine = Math.Min(buf.LineCount - 1, first + (int)(textArea.Height / LineH) + 1);
+        var (ss, se) = buf.Selection;
+        for (int i = first; i <= lastLine; i++)
+        {
+            float y = textArea.Y - _scroll + i * LineH + 2;
+            float x0 = textArea.X + 6 - _scrollX;
+            var line = buf.GetLine(i);
+
+            if (i == buf.Line && !buf.HasSelection) Rl.DrawRectangle((int)textArea.X, (int)y - 2, (int)textArea.Width, (int)LineH, CurrentLine);
+            if (errLines.Contains(i)) Rl.DrawRectangle((int)textArea.X, (int)y - 2, (int)textArea.Width, (int)LineH, new Color(120, 40, 40, 70));
+
+            if (buf.HasSelection && i >= ss.Line && i <= se.Line)
+            {
+                int a = i == ss.Line ? ss.Col : 0;
+                int b = i == se.Line ? se.Col : line.Length + 1;   // +1 shows the selected line break
+                Rl.DrawRectangle((int)(x0 + a * _cw), (int)y - 2, (int)MathF.Max(2f, (b - a) * _cw), (int)LineH, SelectionCol);
+            }
+
+            var kinds = d.Kinds[i];
+            var font = Rl.GetFontDefault();
+            int from = Math.Max(0, (int)(_scrollX / _cw) - 1);
+            int to = Math.Min(line.Length, from + (int)(textArea.Width / _cw) + 3);
+            for (int c = from; c < to; c++)
+            {
+                char ch = line[c];
+                if (ch == ' ') continue;
+                Rl.DrawTextCodepoint(font, ch, new Vector2(x0 + c * _cw, y), FontPx, TokenColors[c < kinds.Length ? (int)kinds[c] : 0]);
+            }
+        }
+
+        if (_focus && !Gui.IsEditing && (int)(Rl.GetTime() * 2) % 2 == 0)
+        {
+            float cx = textArea.X + 6 - _scrollX + buf.Col * _cw;
+            float cy = textArea.Y - _scroll + buf.Line * LineH + 1;
+            Rl.DrawRectangle((int)cx, (int)cy, 2, (int)LineH - 2, Color.White);
+        }
+        Gui.EndScroll(textArea);
+
+        // line numbers (drawn after the text so they are not clipped by the text area)
+        Rl.BeginScissorMode((int)((r.X + 1) * Gui.EffectiveScale), (int)((r.Y + 1) * Gui.EffectiveScale), (int)(gutterW * Gui.EffectiveScale), (int)((r.Height - 2) * Gui.EffectiveScale));
+        for (int i = first; i <= lastLine; i++)
+        {
+            float y = textArea.Y - _scroll + i * LineH + 2;
+            string n = (i + 1).ToString();
+            Gui.TextSized(r.X + gutterW - 8 - Rl.MeasureText(n, FontPx), y, n, FontPx, errLines.Contains(i) ? Bad : i == buf.Line ? Color.White : Gui.TextDim);
+            if (errLines.Contains(i)) Rl.DrawCircle((int)(r.X + 8), (int)(y + 8), 3f, Bad);
+        }
+        Rl.EndScissorMode();
+    }
+
+    private static (int Line, int Col) PointToCaret(TextBuffer buf, Rectangle area)
+    {
+        int line = Math.Clamp((int)((Gui.Mouse.Y - area.Y + _scroll - 2) / LineH), 0, buf.LineCount - 1);
+        int col = Math.Max(0, (int)MathF.Round((Gui.Mouse.X - area.X - 6 + _scrollX) / _cw));
+        return (line, Math.Min(col, buf.GetLine(line).Length));
+    }
+
+    private static bool Pressed(KeyboardKey k) => Rl.IsKeyPressed(k) || Rl.IsKeyPressedRepeat(k);
+
+    private static void HandleInput(TextBuffer buf, Rectangle area, bool hover)
+    {
+        // a click on the suggestion list picks that suggestion
+        if (_compOpen && _comp is not null && Gui.LeftPressed && Rl.CheckCollisionPointRec(Gui.Mouse, _compRect))
+        {
+            int row = (int)((Gui.Mouse.Y - _compRect.Y - 2) / LineH);
+            if (row >= 0 && _compTop + row < _comp.Items.Count) { _compSel = _compTop + row; AcceptCompletion(buf); _followCaret = true; }
+            return;
+        }
+        if (_compOpen && Gui.LeftPressed) _compOpen = false;
+
+        // mouse: click places the caret, drag selects, double click selects a word
+        if (hover && Gui.LeftPressed && !Gui.Busy)
+        {
+            _focus = true;
+            var (l, c) = PointToCaret(buf, area);
+            double now = Rl.GetTime();
+            if (now - _lastClick < 0.35 && l == _lastClickLine) buf.SelectWordAt(l, c);
+            else buf.MoveTo(l, c, Rl.IsKeyDown(KeyboardKey.LeftShift));
+            _lastClick = now; _lastClickLine = l;
+            _selecting = true;
+            _followCaret = true;
+        }
+        else if (Gui.LeftPressed && !hover && !Gui.IsHot(area)) { if (!Gui.IsEditing) { /* a click elsewhere keeps focus off the text */ } }
+
+        if (_selecting)
+        {
+            if (Gui.LeftDown)
+            {
+                var (l, c) = PointToCaret(buf, area);
+                if (l != buf.Line || c != buf.Col) { buf.MoveTo(l, c, select: true); _followCaret = true; }
+            }
+            else _selecting = false;
+        }
+
+        if (hover && Rl.IsKeyDown(KeyboardKey.LeftShift)) _scrollX = MathF.Max(0f, _scrollX - Rl.GetMouseWheelMove() * 60f);
+
+        if (!_focus || Gui.IsEditing || Gui.PopupOpen) return;
+
+        bool ctrl = Rl.IsKeyDown(KeyboardKey.LeftControl) || Rl.IsKeyDown(KeyboardKey.RightControl);
+        bool shift = Rl.IsKeyDown(KeyboardKey.LeftShift) || Rl.IsKeyDown(KeyboardKey.RightShift);
+        bool alt = Rl.IsKeyDown(KeyboardKey.LeftAlt) || Rl.IsKeyDown(KeyboardKey.RightAlt);
+        int rows = Math.Max(1, (int)(area.Height / LineH) - 1);
+        bool moved = false;
+
+        // while the suggestion list is open it takes the arrow keys, Enter, Tab and Esc
+        if (_compOpen && _comp is not null)
+        {
+            int n = _comp.Items.Count;
+            if (Pressed(KeyboardKey.Down)) { _compSel = Math.Min(n - 1, _compSel + 1); KeepSelectionVisible(); return; }
+            if (Pressed(KeyboardKey.Up)) { _compSel = Math.Max(0, _compSel - 1); KeepSelectionVisible(); return; }
+            if (Pressed(KeyboardKey.PageDown)) { _compSel = Math.Min(n - 1, _compSel + CompRows); KeepSelectionVisible(); return; }
+            if (Pressed(KeyboardKey.PageUp)) { _compSel = Math.Max(0, _compSel - CompRows); KeepSelectionVisible(); return; }
+            if (Rl.IsKeyPressed(KeyboardKey.Enter) || Rl.IsKeyPressed(KeyboardKey.KpEnter) || Rl.IsKeyPressed(KeyboardKey.Tab)) { AcceptCompletion(buf); _followCaret = true; return; }
+            if (Rl.IsKeyPressed(KeyboardKey.Escape)) { _compOpen = false; return; }
+        }
+        bool compWasOpen = _compOpen;
+        bool keepComp = false;
+
+        if (ctrl && Rl.IsKeyPressed(KeyboardKey.Space)) { RequestCompletion(buf, explicitRequest: true); keepComp = true; }
+        else if (ctrl && Rl.IsKeyPressed(KeyboardKey.S)) { SaveAndCompile(); return; }
+        else if (ctrl && Rl.IsKeyPressed(KeyboardKey.A)) { buf.SelectAll(); moved = true; }
+        else if (ctrl && Rl.IsKeyPressed(KeyboardKey.C)) Rl.SetClipboardText(buf.Copy());
+        else if (ctrl && Rl.IsKeyPressed(KeyboardKey.X)) { Rl.SetClipboardText(buf.Cut()); moved = true; }
+        else if (ctrl && Rl.IsKeyPressed(KeyboardKey.V)) { buf.Insert(Rl.GetClipboardText_() ?? "", typing: false); moved = true; }
+        else if (ctrl && (Pressed(KeyboardKey.Z) && !shift)) { buf.Undo(); moved = true; }
+        else if (ctrl && (Pressed(KeyboardKey.Y) || (Pressed(KeyboardKey.Z) && shift))) { buf.Redo(); moved = true; }
+        else if (ctrl && Rl.IsKeyPressed(KeyboardKey.Slash)) { buf.ToggleComment(); moved = true; }
+        else if (ctrl && Rl.IsKeyPressed(KeyboardKey.D)) { buf.DuplicateLine(); moved = true; }
+        else if (alt && Pressed(KeyboardKey.Up)) { buf.MoveLine(-1); moved = true; }
+        else if (alt && Pressed(KeyboardKey.Down)) { buf.MoveLine(1); moved = true; }
+        else if (Pressed(KeyboardKey.Left)) { buf.Left(shift, ctrl); moved = true; }
+        else if (Pressed(KeyboardKey.Right)) { buf.Right(shift, ctrl); moved = true; }
+        else if (Pressed(KeyboardKey.Up)) { buf.Up(shift); moved = true; }
+        else if (Pressed(KeyboardKey.Down)) { buf.Down(shift); moved = true; }
+        else if (Pressed(KeyboardKey.PageUp)) { buf.Up(shift, rows); moved = true; }
+        else if (Pressed(KeyboardKey.PageDown)) { buf.Down(shift, rows); moved = true; }
+        else if (Rl.IsKeyPressed(KeyboardKey.Home)) { if (ctrl) buf.DocumentStart(shift); else buf.Home(shift); moved = true; }
+        else if (Rl.IsKeyPressed(KeyboardKey.End)) { if (ctrl) buf.DocumentEnd(shift); else buf.End(shift); moved = true; }
+        else if (Pressed(KeyboardKey.Backspace)) { buf.Backspace(ctrl); moved = true; if (compWasOpen) { RequestCompletion(buf, false); keepComp = true; } }
+        else if (Pressed(KeyboardKey.Delete)) { buf.Delete(ctrl); moved = true; }
+        else if (Pressed(KeyboardKey.Enter) || Pressed(KeyboardKey.KpEnter)) { buf.NewLine(); moved = true; }
+        else if (Pressed(KeyboardKey.Tab)) { if (shift) buf.Outdent(); else buf.Indent(); moved = true; }
+
+        int ch;
+        while ((ch = Rl.GetCharPressed()) > 0)
+        {
+            if (ctrl || ch < 32 || ch == 127) continue;
+            buf.Type((char)ch);
+            moved = true;
+            char typed = (char)ch;
+            if (typed is '.' or '"' or '<') { RequestCompletion(buf, false); keepComp = _compOpen; }
+            else if ((char.IsLetterOrDigit(typed) || typed == '_') && compWasOpen) { RequestCompletion(buf, false); keepComp = _compOpen; }
+            else if (compWasOpen) keepComp = false;
+        }
+        if (compWasOpen && moved && !keepComp) _compOpen = false;
+        if (moved) _followCaret = true;
+    }
+
+    // ---- completion ---------------------------------------------------------------------------
+
+    private static void RequestCompletion(TextBuffer buf, bool explicitRequest)
+    {
+        var r = CompletionEngine.Complete(buf.Text, buf.Line, buf.Col, explicitRequest);
+        if (r is null) { _compOpen = false; return; }
+        _comp = r;
+        _compOpen = true;
+        _compSel = 0;
+        _compTop = 0;
+    }
+
+    private static void KeepSelectionVisible()
+    {
+        if (_compSel < _compTop) _compTop = _compSel;
+        if (_compSel >= _compTop + CompRows) _compTop = _compSel - CompRows + 1;
+    }
+
+    private static void AcceptCompletion(TextBuffer buf)
+    {
+        _compOpen = false;
+        if (_comp is null || _compSel < 0 || _compSel >= _comp.Items.Count) return;
+        var item = _comp.Items[_compSel];
+        int end = buf.Col;
+        buf.MoveTo(buf.Line, Math.Min(_comp.ReplaceStart, end), false);
+        buf.MoveTo(buf.Line, end, true);
+        string insert = item.Insert;
+        if (_comp.InString)
+        {
+            var line = buf.GetLine(buf.Line);
+            if (end >= line.Length || line[end] != '"') insert += "\"";
+        }
+        buf.Insert(insert, typing: false);
+        _focus = true;
+    }
+
+    private static Color KindColor(CompletionKind k) => k switch
+    {
+        CompletionKind.Method => new Color(220, 190, 120, 255),
+        CompletionKind.Property or CompletionKind.Field => new Color(150, 200, 255, 255),
+        CompletionKind.Type or CompletionKind.Component => new Color(78, 201, 176, 255),
+        CompletionKind.Variable => new Color(190, 220, 255, 255),
+        CompletionKind.Object => new Color(240, 160, 120, 255),
+        CompletionKind.Scene or CompletionKind.Group => new Color(200, 140, 255, 255),
+        _ => new Color(86, 156, 214, 255)
+    };
+
+    private static string KindLetter(CompletionKind k) => k switch
+    {
+        CompletionKind.Method => "M", CompletionKind.Property => "P", CompletionKind.Field => "F", CompletionKind.Type => "T", CompletionKind.Component => "C",
+        CompletionKind.Variable => "v", CompletionKind.Object => "O", CompletionKind.Scene => "S", CompletionKind.Group => "G", _ => "k"
+    };
+
+    private static void DrawCompletion(Rectangle editor)
+    {
+        if (!_compOpen || _comp is null || _doc is null || _comp.Items.Count == 0) { _compRect = default; return; }
+        var buf = _doc.Buffer;
+        int rows = Math.Min(CompRows, _comp.Items.Count);
+        float w = 470f, h = rows * LineH + 6f;
+        int digits = Math.Max(3, buf.LineCount.ToString().Length);
+        float gutterW = digits * _cw + 18f;
+        float x = editor.X + gutterW + 6 - _scrollX + _comp.ReplaceStart * _cw;
+        float y = editor.Y + 1 - _scroll + (buf.Line + 1) * LineH + 2;
+        if (y + h > editor.Y + editor.Height) y = editor.Y + 1 - _scroll + buf.Line * LineH - h;   // no room below: above the line
+        x = Math.Clamp(x, 4f, Gui.ScreenWidth - w - 4f);
+        y = Math.Clamp(y, 4f, Gui.ScreenHeight - h - 4f);
+        _compRect = new Rectangle(x, y, w, h);
+
+        Rl.DrawRectangleRec(new Rectangle(x + 3, y + 3, w, h), new Color(0, 0, 0, 90));
+        Rl.DrawRectangleRec(_compRect, new Color(30, 31, 36, 250));
+        Rl.DrawRectangleLinesEx(_compRect, 1f, new Color(90, 94, 108, 255));
+        float wheel = Rl.GetMouseWheelMove();
+        if (wheel != 0 && Rl.CheckCollisionPointRec(Gui.Mouse, _compRect))
+            _compTop = Math.Clamp(_compTop - (int)MathF.Sign(wheel) * 3, 0, Math.Max(0, _comp.Items.Count - CompRows));
+        _compTop = Math.Clamp(_compTop, 0, Math.Max(0, _comp.Items.Count - rows));
+
+        for (int i = 0; i < rows; i++)
+        {
+            int index = _compTop + i;
+            var item = _comp.Items[index];
+            var row = new Rectangle(x + 2, y + 3 + i * LineH, w - 4, LineH);
+            bool sel = index == _compSel;
+            bool hot = Rl.CheckCollisionPointRec(Gui.Mouse, row);
+            if (sel || hot) Rl.DrawRectangleRec(row, sel ? Gui.Accent : Gui.Hover);
+            var kc = KindColor(item.Kind);
+            Rl.DrawText(KindLetter(item.Kind), (int)row.X + 5, (int)row.Y + 2, 14, kc);
+            string name = Gui.FitText(item.Text, 190);
+            Rl.DrawText(name, (int)row.X + 22, (int)row.Y + 2, 16, Color.White);
+            string detail = Gui.FitText(item.Detail, row.Width - 22 - Math.Max(110, Rl.MeasureText(name, 16) + 14) - 6);
+            Rl.DrawText(detail, (int)(row.X + row.Width - 6 - Rl.MeasureText(detail, 14)), (int)row.Y + 3, 14, sel ? new Color(225, 232, 245, 255) : Gui.TextDim);
+        }
+        if (_comp.Items.Count > rows)
+            Rl.DrawText($"{_compSel + 1}/{_comp.Items.Count}", (int)(x + w - 60), (int)(y + h + 2), 12, Gui.TextDim);
+    }
+
+    // ---- the Objects panel --------------------------------------------------------------------
+
+    private static bool Matches(string text) => _objFilter.Length == 0 || text.Contains(_objFilter, StringComparison.OrdinalIgnoreCase);
+
+    private static void BuildObjectRows()
+    {
+        var rows = new List<ObjRow>();
+        bool filtering = _objFilter.Length > 0;
+        var sceneCol = new Color(200, 140, 255, 255);
+        var objCol = new Color(240, 170, 130, 255);
+        var compCol = new Color(78, 201, 176, 255);
+        var propCol = new Color(170, 175, 190, 255);
+
+        foreach (var sc in WorldIndex.Scenes)
+        {
+            var objRows = new List<ObjRow>();
+            for (int oi = 0; oi < sc.Objects.Count; oi++)
+            {
+                var o = sc.Objects[oi];
+                string okey = $"O:{sc.Name}/{oi}";
+                var compRows = new List<ObjRow>();
+                bool anyMatch = Matches(o.Name);
+                foreach (var c in o.Components)
+                {
+                    string ckey = okey + "/" + c.Type;
+                    bool cmatch = Matches(c.Type);
+                    anyMatch |= cmatch;
+                    bool copen = OpenNodes.Contains(ckey) || filtering && cmatch;
+                    compRows.Add(new ObjRow(2, ckey, c.Type, c.Properties.Count > 0 ? c.Properties.Count + " props" : "", c.Type, c.Properties.Count > 0, copen, compCol));
+                    if (copen)
+                        foreach (var (k, v) in c.Properties)
+                            compRows.Add(new ObjRow(3, ckey + "." + k, k, "= " + v, k, false, false, propCol));
+                }
+                if (filtering && !anyMatch) continue;
+                bool oopen = OpenNodes.Contains(okey) || filtering;
+                objRows.Add(new ObjRow(1, okey, o.Name, o.Components.Count + " comp.", o.Name, o.Components.Count > 0, oopen, o.Active ? objCol : objCol with { A = 140 }));
+                if (oopen) objRows.AddRange(compRows);
+            }
+            if (filtering && objRows.Count == 0 && !Matches(sc.Name)) continue;
+            string skey = "S:" + sc.Name;
+            bool sopen = OpenNodes.Contains(skey) || filtering && objRows.Count > 0;
+            rows.Add(new ObjRow(0, skey, sc.Name, $"{sc.Objects.Count} obj." + (sc.Group is not null ? " [" + sc.Group + "]" : ""), sc.Name, sc.Objects.Count > 0, sopen, sceneCol));
+            if (sopen) rows.AddRange(objRows);
+        }
+        _objRows = rows;
+        _objRowsAt = Rl.GetTime();
+        _objRowsFilter = _objFilter;
+        _objRowsVersion = _objVersion;
+    }
+
+    private static void InsertName(string name, int depth)
+    {
+        if (_doc is null) { Info("Open a script first.", warn: true); return; }
+        var buf = _doc.Buffer;
+        string before = buf.GetLine(buf.Line)[..Math.Min(buf.Col, buf.GetLine(buf.Line).Length)];
+        // scenes and objects are written as text ("Level2"); components, properties are plain names
+        string text = depth <= 1 && !CompletionEngine.InsideString(before) ? "\"" + name + "\"" : name;
+        buf.Insert(text, typing: false);
+        _focus = true; _followCaret = true;
+    }
+
+    private static void DrawObjects(Rectangle r)
+    {
+        Rl.DrawRectangleRec(r, Well);
+        Rl.DrawRectangleLinesEx(r, 1f, Line);
+        Gui.SetScope(7640);
+        Gui.TextSized(r.X + 10, r.Y + 8, "Objects", 18, Color.White, bold: true);
+        int sceneCount = WorldIndex.Scenes.Count;
+        Gui.TextSized(r.X + 90, r.Y + 11, $"{sceneCount} scene(s)", 14, Gui.TextDim);
+        Gui.TextField(new Rectangle(r.X + 8, r.Y + 34, r.Width - 16, 24), "objfilter", ref _objFilter, "Filter objects, components ...");
+
+        if (_objRowsVersion != _objVersion || _objRowsFilter != _objFilter || Rl.GetTime() - _objRowsAt > 1.0) BuildObjectRows();
+
+        var view = new Rectangle(r.X + 1, r.Y + 64, r.Width - 2, r.Height - 64 - 40);
+        Gui.BeginScroll(view, ref _objScroll, _objRows.Count * 22f + 6);
+        float y = view.Y - _objScroll + 2;
+        foreach (var row in _objRows.ToList())
+        {
+            var rr = new Rectangle(view.X + 3, y, view.Width - 10, 21);
+            if (rr.Y + rr.Height >= view.Y && rr.Y <= view.Y + view.Height)
+            {
+                bool hot = Gui.IsHot(rr);
+                if (hot) Rl.DrawRectangleRec(rr, Gui.Hover);
+                float ix = rr.X + 4 + row.Depth * 14;
+                if (row.Expandable)
+                {
+                    var arrow = new Rectangle(ix - 2, rr.Y, 16, rr.Height);
+                    string a = row.Open ? "v" : ">";
+                    Rl.DrawText(a, (int)ix, (int)rr.Y + 3, 14, Gui.TextDim);
+                    if (Gui.IsHot(arrow) && Gui.LeftPressed && !Gui.Busy)
+                    {
+                        if (!OpenNodes.Remove(row.Key)) OpenNodes.Add(row.Key);
+                        _objVersion++;
+                    }
+                    else if (hot && Gui.LeftPressed && !Gui.Busy) InsertName(row.Insert, row.Depth);
+                }
+                else if (hot && Gui.LeftPressed && !Gui.Busy) InsertName(row.Insert, row.Depth);
+
+                string label = Gui.FitText(row.Label, rr.Width - 24 - row.Depth * 14 - 80);
+                Rl.DrawText(label, (int)ix + 16, (int)rr.Y + 3, 15, row.Col);
+                string detail = Gui.FitText(row.Detail, 100);
+                Rl.DrawText(detail, (int)(rr.X + rr.Width - 6 - Rl.MeasureText(detail, 13)), (int)rr.Y + 4, 13, Gui.TextDim);
+            }
+            y += 22;
+        }
+        if (_objRows.Count == 0) Gui.Text(view.X + 10, view.Y + 8, _objFilter.Length > 0 ? "Nothing matches." : "No scenes yet.", Gui.TextDim);
+        Gui.EndScroll(view);
+
+        Gui.TextSized(r.X + 10, r.Y + r.Height - 34, Gui.FitText("Click a name to insert it at the cursor.", r.Width - 20), 13, Gui.TextDim);
+        Gui.TextSized(r.X + 10, r.Y + r.Height - 18, Gui.FitText("Ctrl+Space or . for suggestions.", r.Width - 20), 13, Gui.TextDim);
+    }
+
+    // ---- exporting the log -------------------------------------------------------------------
+
+    private static List<LogEntry> ShownEntries() =>
+        DebugLog.Snapshot().Where(e => e.Level switch { LogLevel.Info => _logInfo, LogLevel.Warning => _logWarn, _ => _logErr }).ToList();
+
+    /// <summary>Puts a readable report on the clipboard (only the lines the filters show, or everything).</summary>
+    private static void CopyReport(bool onlyShown)
+    {
+        try
+        {
+            Rl.SetClipboardText(LogExport.ForClipboardOrFile(onlyShown ? ShownEntries() : null));
+            Info("Log copied to the clipboard - paste it into any editor or chat.");
+        }
+        catch (Exception ex) when (ErrorLog.IsRecoverable(ex)) { Info("Could not copy: " + ex.Message, true); }
+    }
+
+    /// <summary>Saves the report to Logs/log-date-time.txt (and Logs/latest.txt).</summary>
+    private static void SaveReport()
+    {
+        try
+        {
+            string path = LogExport.Save();
+            Info("Log saved: " + Path.GetRelativePath(GameProject.Root, path) + " (also Logs/latest.txt)");
+        }
+        catch (Exception ex) when (ErrorLog.IsRecoverable(ex)) { Info("Could not save the log: " + ex.Message, true); }
+    }
+
+    // ---- errors and status -------------------------------------------------------------------
+
+    private static void DrawErrors(Rectangle r)
+    {
+        Rl.DrawRectangleRec(r, Well);
+        Rl.DrawRectangleLinesEx(r, 1f, Line);
+        var items = new List<(string Text, Color Col, ScriptDiagnostic? Diag)>();
+        if (ScriptManager.RuntimeError is { } rt) items.Add(("Runtime: " + rt, Bad, null));
+        if (ScriptManager.Last is { } last)
+            foreach (var d in last.Diagnostics.OrderByDescending(x => x.IsError))
+                items.Add(($"{d.File}({d.Line},{d.Column})  {d.Id}: {d.Message}", d.IsError ? Bad : Warn, d));
+
+        Gui.SetScope(7610);
+        var view = new Rectangle(r.X + 1, r.Y + 1, r.Width - 2, r.Height - 2);
+        if (items.Count > 0)
+        {
+            view.Width -= 132;     // room for the export buttons on the right
+            if (Gui.Button(new Rectangle(r.X + r.Width - 128, r.Y + 4, 60, 22), "Copy")) CopyReport(onlyShown: false);
+            if (Gui.Button(new Rectangle(r.X + r.Width - 64, r.Y + 4, 58, 22), "Save")) SaveReport();
+        }
+        Gui.BeginScroll(view, ref _errScroll, items.Count * 22f + 6);
+        float y = view.Y - _errScroll + 3;
+        foreach (var (text, col, diag) in items)
+        {
+            var row = new Rectangle(view.X + 3, y, view.Width - 12, 21);
+            bool hot = Gui.IsHot(row);
+            if (hot) Rl.DrawRectangleRec(row, Gui.Hover);
+            Gui.TextLeft(row, text, col);
+            if (hot && diag is not null && Gui.LeftPressed && !Gui.Busy) JumpTo(diag);
+            y += 22;
+        }
+        Gui.EndScroll(view);
+    }
+
+    // ---- debug log ---------------------------------------------------------------------------
+
+    private static void DrawLog(Rectangle r)
+    {
+        Rl.DrawRectangleRec(r, Well);
+        Rl.DrawRectangleLinesEx(r, 1f, Line);
+        Gui.SetScope(7630);
+
+        // header: level filters, clear, follow
+        float hx = r.X + 6, hy = r.Y + 4;
+        bool Toggle(string label, ref bool on, int count)
+        {
+            var rect = new Rectangle(hx, hy, Rl.MeasureText($"{label} {count}", Gui.FontSize) + 18, 22);
+            bool clicked = Gui.Button(rect, $"{label} {count}", selected: on);
+            hx += rect.Width + 6;
+            if (clicked) on = !on;
+            return clicked;
+        }
+        Toggle("Info", ref _logInfo, DebugLog.Infos);
+        Toggle("Warnings", ref _logWarn, DebugLog.Warnings);
+        Toggle("Errors", ref _logErr, DebugLog.Errors);
+        if (Gui.Button(new Rectangle(hx, hy, 64, 22), "Clear")) { DebugLog.Clear(); _logSelected = null; _logScroll = 0; }
+        hx += 70;
+        if (Gui.Button(new Rectangle(hx, hy, 58, 22), "Copy")) CopyReport(onlyShown: true);
+        hx += 64;
+        if (Gui.Button(new Rectangle(hx, hy, 58, 22), "Save")) SaveReport();
+        hx += 64;
+        if (Gui.Button(new Rectangle(hx, hy, 84, 22), _logFollow ? "Follow: on" : "Follow: off", selected: _logFollow)) _logFollow = !_logFollow;
+        hx += 90;
+        Gui.Text(hx, hy + 3, Gui.FitText("Debug.Log / LogWarning / LogError or Console.WriteLine in a script. Click a line for details.", r.X + r.Width - hx - 10), Gui.TextDim);
+
+        var entries = DebugLog.Snapshot().Where(e => e.Level switch { LogLevel.Info => _logInfo, LogLevel.Warning => _logWarn, _ => _logErr }).ToList();
+        var rows = new List<(string Text, Color Col, LogEntry? Entry, bool Sub)>();
+        foreach (var e in entries)
+        {
+            var col = e.Level == LogLevel.Error ? Bad : e.Level == LogLevel.Warning ? Warn : new Color(215, 218, 224, 255);
+            string line = $"{e.Time:HH:mm:ss}  [{e.Source}]  {e.Text}" + (e.Count > 1 ? $"   x{e.Count}" : "");
+            rows.Add((line, col, e, false));
+            if (ReferenceEquals(e, _logSelected) && e.Detail is { Length: > 0 } detail)
+                foreach (var d in detail.Split((char)10))
+                    rows.Add(("      " + d.Trim(), Gui.TextDim, e, true));
+        }
+
+        var view = new Rectangle(r.X + 1, r.Y + 30, r.Width - 2, r.Height - 31);
+        float content = rows.Count * 20f + 6;
+        if (DebugLog.Version != _logSeen)
+        {
+            _logSeen = DebugLog.Version;
+            if (_logFollow) _logScroll = content;   // BeginScroll clamps this to the end
+        }
+        Gui.BeginScroll(view, ref _logScroll, content);
+        float y = view.Y - _logScroll + 3;
+        if (rows.Count == 0) Gui.Text(view.X + 10, y + 2, "Nothing logged yet.", Gui.TextDim);
+        foreach (var (text, col, entry, sub) in rows)
+        {
+            var row = new Rectangle(view.X + 3, y, view.Width - 12, 19);
+            if (y + 19 >= view.Y && y <= view.Y + view.Height)
+            {
+                bool hot = Gui.IsHot(row);
+                if (hot || (!sub && ReferenceEquals(entry, _logSelected))) Rl.DrawRectangleRec(row, Gui.Hover);
+                Gui.TextLeft(row, Gui.FitText(text, row.Width - 8), col);
+                if (hot && !sub && Gui.LeftPressed && !Gui.Busy && entry is not null)
+                {
+                    _logSelected = ReferenceEquals(_logSelected, entry) ? null : entry;
+                    _logFollow = false;
+                    var m = System.Text.RegularExpressions.Regex.Match(entry.Text, @"(\w+\.cs)\((\d+),(\d+)\)");
+                    if (m.Success) JumpTo(new ScriptDiagnostic(m.Groups[1].Value, int.Parse(m.Groups[2].Value), int.Parse(m.Groups[3].Value), "", "", false));
+                }
+            }
+            y += 20;
+        }
+        Gui.EndScroll(view);
+    }
+
+    private static void JumpTo(ScriptDiagnostic d)
+    {
+        var path = _files.FirstOrDefault(f => string.Equals(Path.GetFileName(f), d.File, StringComparison.OrdinalIgnoreCase));
+        if (path is null) return;
+        OpenFile(path);
+        _doc?.Buffer.MoveTo(d.Line - 1, d.Column - 1);
+        _focus = true; _followCaret = true;
+    }
+
+    private static void DrawStatus(Rectangle r)
+    {
+        Gui.SetScope(7620);
+        float bx = r.X;
+        if (Gui.Button(new Rectangle(bx, r.Y, 190, r.Height), "Save & Compile  (Ctrl+S)")) SaveAndCompile();
+        bx += 200;
+        if (Gui.Button(new Rectangle(bx, r.Y, 100, r.Height), _showObjects ? "Hide Objects" : "Objects")) _showObjects = !_showObjects;
+        bx += 110;
+        int errs = DebugLog.Errors;
+        if (Gui.Button(new Rectangle(bx, r.Y, errs > 0 && !_showLog ? 100 : 70, r.Height), _showLog ? "Hide Log" : errs > 0 ? $"Log ({errs})" : "Log", selected: _showLog)) _showLog = !_showLog;
+        bx += (errs > 0 && !_showLog ? 100 : 70) + 10;
+
+        string pos = _doc is null ? "" : $"Ln {_doc.Buffer.Line + 1}, Col {_doc.Buffer.Col + 1}";
+        float right = r.X + r.Width;
+        float posW = Rl.MeasureText("Ln 9999, Col 999", Gui.FontSize) + 10;
+        Gui.Text(right - posW, r.Y + 5, pos, Gui.TextDim);
+        string msg = _info.Length > 0 ? _info : ScriptManager.Last is { } l
+            ? (l.Success ? $"Compiled {l.Files} file(s) in {l.Milliseconds:0} ms: {(l.TypeNames.Count > 0 ? string.Join(", ", l.TypeNames) : "no components")}" : $"{l.Errors.Count()} error(s)")
+            : "Ctrl+S saves and compiles. Components appear in Add Component.";
+        Gui.Text(bx, r.Y + 5, Gui.FitText(msg, right - posW - bx - 10), _info.Length > 0 ? _infoColor : Gui.TextDim);
+    }
+}

@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/SharpEngine.Raylib/SharpEngine.Raylib.csproj" />
+    <Compile Include="../Shared/Protocol.cs" Link="Protocol.cs" />
+    <Compile Include="../ArenaClient/ArenaGame.cs" Link="ArenaGame.cs" />
+    <Compile Include="../ArenaClient/Components.cs" Link="Components.cs" />
+  </ItemGroup>
+
+</Project>

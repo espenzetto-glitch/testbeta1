@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>$(SharpTfm)</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>preview</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Scripts/*.cs are compiled by the in-game code editor while the game runs, not by dotnet build -->
+    <Compile Remove="Scripts/**" />
+    <None Remove="Scripts/**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/SharpEngine.Graphics3D/SharpEngine.Graphics3D.csproj" />
+  </ItemGroup>
+
+</Project>

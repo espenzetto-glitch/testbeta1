@@ -1,0 +1,23 @@
+﻿SharpEngine log report
+======================
+Created : 2026-11-10 01:29:54
+Scene   : NewScene
+Project : C:\Games\SharpEngine\samples\Game3D
+System  : .NET 11.0.0-rc.3.26522.148, Microsoft Windows 10.0.26200
+Summary : 0 error(s), 0 warning(s), 0 message(s)
+
+COMPILE PROBLEMS (latest build)
+-------------------------------
+1. WARNING CS0162   _1.cs  line 190, column 31
+   Unreachable code detected
+     190 |                     if (Is2D) dy = fx.DirB * step;
+                                         ^
+
+2. WARNING CS0162   _1.cs  line 205, column 27
+   Unreachable code detected
+     205 |                 if (Is2D) obj.Transform.Rotate(new Vector3(0f, 0f, spin));
+                                     ^
+
+LOG (oldest first)
+------------------
+(empty)

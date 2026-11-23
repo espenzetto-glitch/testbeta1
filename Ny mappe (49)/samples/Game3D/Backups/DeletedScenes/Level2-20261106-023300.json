@@ -1,0 +1,890 @@
+{
+  "version": 1,
+  "settings": {
+    "sunDirection": [
+      0.65005845,
+      -0.74740934,
+      -0.13712554
+    ],
+    "sunColor": [
+      255,
+      190,
+      130,
+      255
+    ],
+    "sunIntensity": 1,
+    "ambient": 0.28,
+    "skyTop": [
+      120,
+      60,
+      150,
+      255
+    ],
+    "skyBottom": [
+      250,
+      180,
+      120,
+      255
+    ],
+    "showGrid": true,
+    "showAxes": true,
+    "sizeX": 200,
+    "sizeZ": 200,
+    "showBounds": true,
+    "clampCamera": false
+  },
+  "objects": [
+    {
+      "name": "Main Camera",
+      "active": true,
+      "position": [
+        10.304932,
+        4.003765,
+        -48.757732
+      ],
+      "rotation": [
+        1.0976766,
+        16.67999,
+        0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "components": [
+        {
+          "type": "CameraComponent",
+          "properties": {
+            "Enabled": true,
+            "FieldOfView": 60
+          }
+        },
+        {
+          "type": "FlyCamera",
+          "properties": {
+            "Enabled": true,
+            "Speed": 6,
+            "FastMultiplier": 3,
+            "Sensitivity": 0.12
+          }
+        }
+      ]
+    },
+    {
+      "name": "Ground",
+      "active": true,
+      "position": [
+        0,
+        0,
+        3.1980572
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "ModelPart": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "Tint": [
+              255,
+              225,
+              200,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0,
+            "Shininess": 32
+          }
+        },
+        {
+          "type": "CrystalMesh",
+          "properties": {
+            "Enabled": true,
+            "Sides": 6,
+            "Radius": 1,
+            "Height": 1.6,
+            "Top": [
+              160,
+              240,
+              255,
+              255
+            ],
+            "Bottom": [
+              60,
+              90,
+              255,
+              255
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Step 1",
+      "active": true,
+      "position": [
+        -6,
+        0.5,
+        -2
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1.5,
+        1,
+        1.5
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "ModelPart": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "PrimitiveName": "Cube",
+            "Tint": [
+              120,
+              90,
+              200,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0.25,
+            "Shininess": 32
+          }
+        }
+      ]
+    },
+    {
+      "name": "Step 2",
+      "active": true,
+      "position": [
+        -4.4,
+        1,
+        -2
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1.5,
+        2,
+        1.5
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "ModelPart": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "PrimitiveName": "Cube",
+            "Tint": [
+              142,
+              98,
+              200,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0.25,
+            "Shininess": 32
+          }
+        }
+      ]
+    },
+    {
+      "name": "Step 3",
+      "active": true,
+      "position": [
+        -2.8,
+        1.5,
+        -2
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1.5,
+        3,
+        1.5
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "ModelPart": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "PrimitiveName": "Cube",
+            "Tint": [
+              164,
+              106,
+              200,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0.25,
+            "Shininess": 32
+          }
+        }
+      ]
+    },
+    {
+      "name": "Step 4",
+      "active": true,
+      "position": [
+        -10.240808,
+        2.03,
+        -2
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1.5,
+        4,
+        1.5
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "ModelPart": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "PrimitiveName": "Cube",
+            "Tint": [
+              186,
+              114,
+              200,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0.25,
+            "Shininess": 32
+          }
+        },
+        {
+          "type": "ZoneSpawner",
+          "properties": {
+            "Enabled": true,
+            "ZoneName": "Meadow",
+            "Tier": 0,
+            "Count": 10,
+            "Radius": 25,
+            "Height": 0.8
+          }
+        }
+      ]
+    },
+    {
+      "name": "Step 5",
+      "active": true,
+      "position": [
+        -13.795356,
+        2.1885204,
+        -2
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1.5,
+        5,
+        1.5
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "ModelPart": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "Tint": [
+              208,
+              122,
+              200,
+              255
+            ],
+            "Unlit": true,
+            "DoubleSided": true,
+            "Specular": 0.25,
+            "Shininess": 30.65
+          }
+        },
+        {
+          "type": "Step5Mesh",
+          "properties": {
+            "Enabled": true,
+            "Radius": 0.099999934,
+            "WaveStrength": 0.99000007,
+            "WaveSpeed": 2.1,
+            "SpikeStrength": -0.97,
+            "CoreGlow": 2.1000001,
+            "Segments": 10,
+            "Rings": 25
+          }
+        }
+      ]
+    },
+    {
+      "name": "Step 6",
+      "active": true,
+      "position": [
+        2,
+        3,
+        -2
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1.5,
+        6,
+        1.5
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "ModelPart": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "PrimitiveName": "Cube",
+            "Tint": [
+              230,
+              130,
+              200,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0.25,
+            "Shininess": 32
+          }
+        }
+      ]
+    },
+    {
+      "name": "Sphere",
+      "active": true,
+      "position": [
+        5,
+        3.0419457,
+        -3
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        3,
+        3,
+        3
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "ModelPart": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "PrimitiveName": "Sphere",
+            "Tint": [
+              250,
+              120,
+              140,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0.9,
+            "Shininess": 32
+          }
+        },
+        {
+          "type": "Bobber",
+          "properties": {
+            "Enabled": true,
+            "Amplitude": 0.6,
+            "Speed": 1.2
+          }
+        }
+      ]
+    },
+    {
+      "name": "Cylinder",
+      "active": true,
+      "position": [
+        0,
+        1.2,
+        3
+      ],
+      "rotation": [
+        0,
+        1093.5524,
+        0
+      ],
+      "scale": [
+        0.6,
+        2.4,
+        0.6
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "ModelPart": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "PrimitiveName": "Cylinder",
+            "Tint": [
+              255,
+              230,
+              120,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0.25,
+            "Shininess": 32
+          }
+        },
+        {
+          "type": "Spinner",
+          "properties": {
+            "Enabled": true,
+            "DegreesPerSecond": [
+              0,
+              90,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Portal to Level3 Pad",
+      "active": true,
+      "position": [
+        9,
+        0.08,
+        8
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        2.6,
+        0.15,
+        2.6
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "ModelPart": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "PrimitiveName": "Cylinder",
+            "Tint": [
+              255,
+              170,
+              60,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0.6,
+            "Shininess": 32
+          }
+        }
+      ]
+    },
+    {
+      "name": "Portal to Level3",
+      "active": true,
+      "position": [
+        9,
+        0.9629616,
+        8
+      ],
+      "rotation": [
+        0,
+        1458.0702,
+        0
+      ],
+      "scale": [
+        1.2,
+        1.8,
+        1.2
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "ModelPart": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "PrimitiveName": "Pyramid",
+            "Tint": [
+              255,
+              170,
+              60,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0.25,
+            "Shininess": 32
+          }
+        },
+        {
+          "type": "Spinner",
+          "properties": {
+            "Enabled": true,
+            "DegreesPerSecond": [
+              0,
+              120,
+              0
+            ]
+          }
+        },
+        {
+          "type": "Bobber",
+          "properties": {
+            "Enabled": true,
+            "Amplitude": 0.25,
+            "Speed": 3
+          }
+        },
+        {
+          "type": "ScenePortal",
+          "properties": {
+            "Enabled": true,
+            "TargetScene": "Level3",
+            "Mode": "Load",
+            "Radius": 2.6,
+            "RequireInteract": true,
+            "InteractKey": "E",
+            "Prompt": "",
+            "ShowDebug": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "Portal to MainScene Pad",
+      "active": true,
+      "position": [
+        -9,
+        0.08,
+        8
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        2.6,
+        0.15,
+        2.6
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "ModelPart": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "PrimitiveName": "Cylinder",
+            "Tint": [
+              60,
+              200,
+              255,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0.6,
+            "Shininess": 32
+          }
+        }
+      ]
+    },
+    {
+      "name": "Portal to MainScene",
+      "active": true,
+      "position": [
+        -9,
+        0.9629616,
+        8
+      ],
+      "rotation": [
+        0,
+        1458.0702,
+        0
+      ],
+      "scale": [
+        1.2,
+        1.8,
+        1.2
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "ModelPart": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "PrimitiveName": "Pyramid",
+            "Tint": [
+              60,
+              200,
+              255,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0.25,
+            "Shininess": 32
+          }
+        },
+        {
+          "type": "Spinner",
+          "properties": {
+            "Enabled": true,
+            "DegreesPerSecond": [
+              0,
+              120,
+              0
+            ]
+          }
+        },
+        {
+          "type": "Bobber",
+          "properties": {
+            "Enabled": true,
+            "Amplitude": 0.25,
+            "Speed": 3
+          }
+        },
+        {
+          "type": "ScenePortal",
+          "properties": {
+            "Enabled": true,
+            "TargetScene": "MainScene",
+            "Mode": "Load",
+            "Radius": 2.6,
+            "RequireInteract": true,
+            "InteractKey": "E",
+            "Prompt": "",
+            "ShowDebug": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "Scene Components",
+      "active": true,
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "ModelPart": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "PrimitiveName": "Triangle",
+            "Tint": [
+              200,
+              200,
+              205,
+              255
+            ],
+            "Unlit": true,
+            "DoubleSided": false,
+            "Specular": 0.25,
+            "Shininess": 32
+          }
+        }
+      ],
+      "scene": true
+    },
+    {
+      "name": "Cube",
+      "active": true,
+      "position": [
+        0,
+        1,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "ModelPart": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "PrimitiveName": "Cube",
+            "Tint": [
+              255,
+              255,
+              255,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0.25,
+            "Shininess": 32
+          }
+        }
+      ]
+    },
+    {
+      "name": "Cube",
+      "active": true,
+      "position": [
+        2,
+        1,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "components": [
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "Enabled": true,
+            "ModelPath": "",
+            "ModelPart": "",
+            "TexturePath": "",
+            "TileU": 1,
+            "TileV": 1,
+            "PrimitiveName": "Cube",
+            "Tint": [
+              255,
+              255,
+              255,
+              255
+            ],
+            "Unlit": false,
+            "DoubleSided": true,
+            "Specular": 0.25,
+            "Shininess": 32
+          }
+        }
+      ]
+    }
+  ]
+}
