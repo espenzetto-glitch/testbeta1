@@ -1,45 +1,115 @@
-﻿# SharpEngine
+# SharpEngine
 
-A C# game engine: a 2D core plus a Unity-style 3D engine with an in-game editor, scenes, portals, streaming and merging,
-C# scripting with a built-in code editor, a GPU renderer, and export to desktop and the browser (WebGL / WebAssembly).
+SharpEngine is a C# game engine with a 2D core and a Unity-style 3D engine. It includes an in-game editor, scenes and portals, world streaming, C# scripting, GPU rendering, and desktop and browser builds.
 
-- C# 15 preview and .NET 11 (preview), with a fallback to .NET 8
-- Raylib-cs 7.0.1 for window, input and OpenGL
+## Features
 
-## Quick start
-**PowerShell** (the default Windows Terminal window):
+- 2D game loop, scenes, input, networking and Raylib rendering
+- 3D worlds made from `GameObject`, `Transform` and `Component` types
+- Scene hierarchy, inspector, code editor, world map and build tools
+- C# scripting with hot compilation and automatic error logging
+- GPU rendering with a CPU fallback
+- Desktop builds and WebGL/WebAssembly browser builds
+
+## Requirements
+
+- Windows, macOS or Linux
+- .NET 11 SDK for C# 15 features such as `union` types and `[with(...)]`
+- .NET 8 can be used with `-p:SharpTfm=net8.0`; C# 15 features are unavailable
+- OpenGL 3.3 or newer for the GPU renderer
+
+Check the installed SDKs:
+
 ```powershell
-mkdir C:\Games -Force; cd C:\Games
-tar -xf "$env:USERPROFILE\Downloads\SharpEngine.zip"
-cd SharpEngine
+dotnet --list-sdks
+```
+
+## Run the 3D editor
+
+From the repository root:
+
+```powershell
 dotnet run --project samples\Game3D
 ```
-**Command Prompt (cmd):**
-```bat
-cd /d C:\Games
-tar -xf "%USERPROFILE%\Downloads\SharpEngine.zip"
-cd SharpEngine
-dotnet run --project samples\Game3D
+
+With .NET 8:
+
+```powershell
+dotnet run --project samples\Game3D -p:SharpTfm=net8.0
 ```
-Type these lines into the terminal; do not paste the README itself. `cd /d` and `%USERPROFILE%` only work in cmd.
-No .NET 11 SDK yet? Add `-p:SharpTfm=net8.0`.
+
+## Controls
+
+- `Right mouse + W/A/S/D/Q/E`: fly the editor camera
+- `Shift`: move faster
+- `Middle mouse`: pan
+- `Alt + left mouse`: orbit
+- `F`: focus selected object
+- `G`: drop to ground
+- `Left mouse`: select or drag
+- `F5`: enter Play mode
+- `F1`: hide or show the editor
+- `F3`: open the chunk debugger
+- `F4`: open the code editor
+- `Ctrl+S`: save or compile scripts
+- `Ctrl+I`: import models, textures or folders
+- `F2` or `` ` ``: open the console
+
+## Project structure
+
+| Path | Purpose |
+|---|---|
+| `src/SharpEngine` | Core 2D engine |
+| `src/SharpEngine.Raylib` | Raylib renderer and input |
+| `src/SharpEngine.Graphics3D` | 3D engine and editor |
+| `src/SharpEngine.Streaming` | World streaming implementation |
+| `src/SharpEngine.Web` | WebAssembly browser player |
+| `samples/Game3D` | Main 3D editor and demo |
+| `samples/ArenaClient` | 2D arena client |
+| `samples/ArenaWindow` | 2D Raylib window demo |
+| `samples/DemoServer` | 2D demo server |
+| `docs/` | User and API documentation |
+| `tests/` | Engine and streaming tests |
+
+Game data is stored beside the Game3D project:
+
+- `Scenes/`: scene JSON files
+- `Scripts/`: C# component and world scripts
+- `Assets/`: textures and models
+- `WorldMap.json`: scene positions and merge groups
+- `BuildSettings.json`: platform and build settings
+- `Logs/`: runtime error logs
+- `Backups/`: automatic scene backups
+
+## Build and test
+
+Build the solution:
+
+```powershell
+dotnet build SharpEngine.sln
+```
+
+Run the C# tests:
+
+```powershell
+dotnet test tests\SharpEngine.Streaming.Tests\SharpEngine.Streaming.Tests.csproj
+```
+
+Run the JavaScript streaming tests:
+
+```powershell
+node tests\streaming.test.mjs
+```
 
 ## Documentation
-| Page | Contents |
-|---|---|
-| [Getting started](docs/getting-started.md) | requirements, running, project layout |
-| [The editor](docs/editor.md) | hierarchy, inspector, Build Settings, textures and models |
-| [Scenes, portals and the world](docs/scenes-and-worlds.md) | portals, World Map, streaming, merging |
-| [Scripting and code editors](docs/scripting.md) | component scripts, World Code, mesh code, C# 15 and `union` |
-| [Rendering and web export](docs/rendering-and-export.md) | GPU renderer, WebGL single file, WebAssembly |
-| [Architecture](docs/architecture.md) | layers, rendering, safety net, tests |
-| [Console / Raylib 2D engine](docs/console-engine.md) | the original 2D engine and demos |
-| [Troubleshooting](docs/troubleshooting.md) | common problems |
 
-## Controls (3D editor)
-Right mouse + W A S D / Q E = fly the editor camera (Shift faster, wheel = zoom), middle mouse = pan, Alt + left mouse = orbit, F = focus, G = drop to ground, left mouse = select/drag, F5 = Play, F1 = hide editor, F3 = chunk debugger,
-F4 = code editor, F2 or ` = console (cmd inside the editor: dotnet build, dir, open <scene>, play ...), Ctrl+S = save / compile scripts, Ctrl+D = duplicate, Del = delete, Ctrl+Space = code completion.
-
-Editor tips: press **Ctrl+I** (Import...) to browse your files and import models, textures or whole folders, or drag `.fbx`/`.obj` files or a whole folder onto the window to import (several meshes per file keep their own textures and land in a Hierarchy folder). Select an object or folder in the list and press **F** to fly to it.
-
-Using another AI with this engine? Give it `docs/AI_GUIDE.md` (short rules and templates, including union types with world scripts) and `docs/ENGINE_REFERENCE.md` (every class and member).
+- [Getting started](docs/getting-started.md)
+- [Editor guide](docs/editor.md)
+- [Scenes and worlds](docs/scenes-and-worlds.md)
+- [Scripting](docs/scripting.md)
+- [Rendering and export](docs/rendering-and-export.md)
+- [Architecture](docs/architecture.md)
+- [Console and 2D engine](docs/console-engine.md)
+- [AI guide](docs/AI_GUIDE.md)
+- [Complete engine reference](docs/ENGINE_REFERENCE.md)
+- [Troubleshooting](docs/troubleshooting.md)
